@@ -191,7 +191,23 @@ For the WASM path: `rustup target add wasm32-unknown-unknown` + `cargo install t
   ```
   Dev box is **headless** (no DISPLAY) but has an RTX 3090 + Vulkan, so the offscreen path works; the
   windowed `cargo run` needs a display (untested here).
-- NOT yet done: `.ply` loader (M4 / M2b), the A1 standard-`.ply`-through-WSR demo, the tt-splat
-  exporter + loader for our trained gaussians (M5), real camera intrinsics + orbit/fly controls,
-  tiling/cull/fixed-K (M6). To push PSNR higher than 8-bit allows, diff in float (dump f32 from both).
+- **M4 (`.ply` viewer) — DONE & PASSING.** `scene::load_ply` reads standard INRIA-3DGS `.ply`
+  (binary-LE/ascii, properties by name; skips normals/`f_rest`). `scene::Orbit` auto-frames a scene
+  and drives an orbit camera; the windowed path (`run()`) loads a `.ply` from argv and supports
+  drag-to-orbit + scroll-zoom (re-runs the CPU preprocess per move). `validation/export_ply.py`
+  exports a tt-splat `GaussianModel(gt=True)` to a `.ply` + oracle-matched `view.json` + arm-A render.
+  **Result: 2000 gaussians @ 512², PSNR 67.10 dB, max|Δ| = 1/255.** The orbit/auto-frame code is also
+  exercised headlessly via `offscreen ... --orbit <yaw> <pitch>` (the interactive window itself is
+  untested here — the dev box has no display).
+  ```
+  ../tt-splat/.venv/bin/python validation/export_ply.py 2000
+  cargo run --bin offscreen -- validation/model.ply validation/rust_ply.png validation/view.json
+  ../tt-splat/.venv/bin/python validation/psnr.py validation/oracle_ply.png validation/rust_ply.png
+  ```
+- NOT yet done: a *real captured* 3DGS scene (download one to point the viewer at — that's the true
+  A1 occlusion demo; the gt export above is synthetic and uniform), the faithful tt-splat exporter for
+  our trained gaussians (M5), tiling/bounding-cull/fixed-K for scale (M6). To push PSNR past the 8-bit
+  ceiling, diff in float (dump f32 from both sides).
 - Cargo.lock is gitignored (minimal-tracking policy); flip that if you want reproducible bin builds.
+- No abist code is actually vendored yet — the plumbing here is original. Keep the attribution clause
+  ready for if/when a file is genuinely adapted.

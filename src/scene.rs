@@ -246,6 +246,157 @@ pub fn load_scene_json(path: &std::path::Path) -> std::io::Result<(Vec<Gaussian>
     Ok((gaussians, bg, cam))
 }
 
+/// Load a camera + background (no gaussians) from a `view.json` — used to render a `.ply` with a
+/// fixed, oracle-matched camera in the PSNR harness.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_view_json(path: &std::path::Path) -> std::io::Result<(Background, Camera)> {
+    #[derive(serde::Deserialize)]
+    struct CamJson { r_v: [f32; 9], t_v: [f32; 3], fx: f32, fy: f32, cx: f32, cy: f32 }
+    #[derive(serde::Deserialize)]
+    struct BgJson { w_b: f32, c_b: [f32; 3] }
+    #[derive(serde::Deserialize)]
+    struct ViewJson { width: u32, height: u32, camera: CamJson, background: BgJson }
+
+    let text = std::fs::read_to_string(path)?;
+    let v: ViewJson = serde_json::from_str(&text)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let cam = Camera::from_rt(
+        v.camera.r_v, v.camera.t_v, v.camera.fx, v.camera.fy, v.camera.cx, v.camera.cy, v.width, v.height,
+    );
+    Ok((Background { w_b: v.background.w_b, c_b: Vec3::from_array(v.background.c_b) }, cam))
+}
+
+/// Load a standard INRIA-3DGS `.ply` (binary-little-endian or ascii). Reads vertex properties by
+/// name: `x y z`, `scale_0..2` (log), `rot_0..3` (quaternion `w,x,y,z`), `f_dc_0..2` (SH-deg0 color),
+/// `opacity` (pre-sigmoid). Any extra properties (normals, `f_rest_*`) are skipped — WSR uses DC only.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_ply(path: &std::path::Path) -> std::io::Result<Vec<Gaussian>> {
+    use std::io::{Error, ErrorKind};
+    let bytes = std::fs::read(path)?;
+
+    let marker = b"end_header\n";
+    let header_end = bytes
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "no end_header"))?;
+    let data_start = header_end + marker.len();
+    let header = String::from_utf8_lossy(&bytes[..header_end]);
+
+    let mut is_ascii = false;
+    let mut count = 0usize;
+    // (name, byte size) in file order, for the `vertex` element.
+    let mut props: Vec<(String, usize)> = Vec::new();
+    let type_size = |t: &str| -> usize {
+        match t {
+            "char" | "uchar" | "int8" | "uint8" => 1,
+            "short" | "ushort" | "int16" | "uint16" => 2,
+            "int" | "uint" | "int32" | "uint32" | "float" | "float32" => 4,
+            "double" | "float64" => 8,
+            _ => 4,
+        }
+    };
+    for line in header.lines() {
+        let tok: Vec<&str> = line.split_whitespace().collect();
+        match tok.as_slice() {
+            ["format", fmt, ..] => is_ascii = fmt.starts_with("ascii"),
+            ["element", "vertex", n] => count = n.parse().unwrap_or(0),
+            ["property", ty, name] => props.push((name.to_string(), type_size(ty))),
+            _ => {}
+        }
+    }
+
+    let idx = |name: &str| props.iter().position(|(n, _)| n == name);
+    let need = ["x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+        "f_dc_0", "f_dc_1", "f_dc_2", "opacity"];
+    let mut col = std::collections::HashMap::new();
+    for name in need {
+        let i = idx(name).ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("missing property {name}")))?;
+        col.insert(name, i);
+    }
+
+    // Per-property byte offset within a vertex record (binary).
+    let mut offset = Vec::with_capacity(props.len());
+    let mut acc = 0usize;
+    for (_, sz) in &props {
+        offset.push(acc);
+        acc += sz;
+    }
+    let stride = acc;
+
+    let g_at = |vals: &dyn Fn(&str) -> f32| Gaussian {
+        mean: Vec3::new(vals("x"), vals("y"), vals("z")),
+        log_scale: Vec3::new(vals("scale_0"), vals("scale_1"), vals("scale_2")),
+        quat: [vals("rot_0"), vals("rot_1"), vals("rot_2"), vals("rot_3")],
+        color_dc: Vec3::new(vals("f_dc_0"), vals("f_dc_1"), vals("f_dc_2")),
+        opacity_raw: vals("opacity"),
+    };
+
+    let mut out = Vec::with_capacity(count);
+    if is_ascii {
+        let text = String::from_utf8_lossy(&bytes[data_start..]);
+        for line in text.lines().filter(|l| !l.trim().is_empty()).take(count) {
+            let nums: Vec<f32> = line.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            let vals = |name: &str| nums[col[name]];
+            out.push(g_at(&vals));
+        }
+    } else {
+        for i in 0..count {
+            let base = data_start + i * stride;
+            if base + stride > bytes.len() {
+                return Err(Error::new(ErrorKind::UnexpectedEof, "ply body truncated"));
+            }
+            let vals = |name: &str| -> f32 {
+                let o = base + offset[col[name]];
+                f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
+            };
+            out.push(g_at(&vals));
+        }
+    }
+    Ok(out)
+}
+
+/// An orbit camera: rotate `yaw`/`pitch` around `target` at `radius`, vertical fov `fovy` (radians).
+#[derive(Clone, Copy, Debug)]
+pub struct Orbit {
+    pub target: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub radius: f32,
+    pub fovy: f32,
+}
+
+impl Orbit {
+    /// Frame a gaussian set: centroid as target, radius from the bounding sphere + fov.
+    pub fn frame(gaussians: &[Gaussian]) -> Self {
+        let fovy = 60f32.to_radians();
+        if gaussians.is_empty() {
+            return Orbit { target: Vec3::ZERO, yaw: 0.0, pitch: 0.0, radius: 5.0, fovy };
+        }
+        let centroid = gaussians.iter().map(|g| g.mean).sum::<Vec3>() / gaussians.len() as f32;
+        let bound = gaussians
+            .iter()
+            .map(|g| (g.mean - centroid).length())
+            .fold(0.0f32, f32::max)
+            .max(1e-3);
+        // distance so the bounding sphere fits the vertical fov, with margin.
+        let radius = 1.4 * bound / (fovy * 0.5).sin();
+        Orbit { target: centroid, yaw: 0.0, pitch: 0.0, radius, fovy }
+    }
+
+    /// Eye position for the current orbit angles (OpenCV: looking toward +forward, +y down handled by `look_at`).
+    pub fn eye(&self) -> Vec3 {
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        let dir = Vec3::new(cp * sy, sp, cp * cy);
+        self.target - dir * self.radius
+    }
+
+    pub fn camera(&self, width: u32, height: u32) -> Camera {
+        let focal = (height as f32 * 0.5) / (self.fovy * 0.5).tan();
+        Camera::look_at(self.eye(), self.target, Vec3::new(0.0, 1.0, 0.0), focal, focal, width, height)
+    }
+}
+
 /// A tiny hand-made scene for milestone 2/3: three overlapping gaussians on a gray background.
 /// Deliberately depth-overlapping so the depth-free WSR averaging (weakness A1) is visible.
 pub fn synthetic_scene() -> (Vec<Gaussian>, Background) {

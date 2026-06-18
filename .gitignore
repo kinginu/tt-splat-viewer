@@ -13,8 +13,9 @@
 *.png
 !docs/**/*.png
 
-# generated validation artifacts (reproducible via validation/oracle.py)
+# generated validation artifacts (reproducible via validation/*.py)
 /validation/scene.json
+/validation/view.json
 /Cargo.lock
 
 # editor / os

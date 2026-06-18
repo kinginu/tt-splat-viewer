@@ -26,7 +26,7 @@ use winit::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-use scene::{Background, Camera, InstanceRaw};
+use scene::{Background, InstanceRaw};
 
 const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
@@ -267,6 +267,16 @@ impl Renderer {
         );
     }
 
+    /// Re-upload the per-gaussian instances (after a camera move re-runs the CPU preprocess).
+    fn update_instances(&mut self, device: &wgpu::Device, instances: &[InstanceRaw]) {
+        self.instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("instances"),
+            contents: bytemuck::cast_slice(instances),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        self.instance_count = instances.len() as u32;
+    }
+
     fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         // Pass 1: additive splat into the accumulator (cleared to 0).
         {
@@ -352,7 +362,7 @@ fn make_composite_bg(
     })
 }
 
-/// Window + surface + the WSR renderer.
+/// Window + surface + the WSR renderer + the interactive orbit scene.
 struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -361,10 +371,15 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     window: Arc<Window>,
     renderer: Renderer,
+
+    gaussians: Vec<scene::Gaussian>,
+    orbit: scene::Orbit,
+    dragging: bool,
+    last_cursor: Option<(f64, f64)>,
 }
 
 impl State {
-    async fn new(window: Arc<Window>) -> State {
+    async fn new(window: Arc<Window>, gaussians: Vec<scene::Gaussian>, bg: Background) -> State {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -419,17 +434,9 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        // Build the synthetic scene and preprocess it for this camera.
-        let (gaussians, bg) = scene::synthetic_scene();
-        let cam = Camera::look_at(
-            glam::Vec3::new(0.0, 0.0, 0.0),
-            glam::Vec3::new(0.0, 0.0, 1.0),
-            glam::Vec3::new(0.0, 1.0, 0.0),
-            config.width as f32, // fx ≈ width (≈53° hfov) — placeholder until real intrinsics
-            config.width as f32,
-            config.width,
-            config.height,
-        );
+        // Frame the scene with an orbit camera and preprocess for the initial view.
+        let orbit = scene::Orbit::frame(&gaussians);
+        let cam = orbit.camera(config.width, config.height);
         let instances = scene::preprocess(&gaussians, &cam);
         let renderer = Renderer::new(&device, format, config.width, config.height, &instances, &bg);
 
@@ -441,7 +448,19 @@ impl State {
             size,
             window,
             renderer,
+            gaussians,
+            orbit,
+            dragging: false,
+            last_cursor: None,
         }
+    }
+
+    /// Re-run the CPU preprocess for the current orbit camera and re-upload the instances.
+    fn refresh_view(&mut self) {
+        let cam = self.orbit.camera(self.config.width, self.config.height);
+        let instances = scene::preprocess(&self.gaussians, &cam);
+        self.renderer.update_instances(&self.device, &instances);
+        self.window.request_redraw();
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -452,7 +471,23 @@ impl State {
             self.surface.configure(&self.device, &self.config);
             self.renderer
                 .resize(&self.device, &self.queue, new_size.width, new_size.height);
+            self.refresh_view();
         }
+    }
+
+    /// Handle a mouse-drag delta (orbit) — yaw/pitch around the target.
+    fn orbit_drag(&mut self, dx: f64, dy: f64) {
+        let sens = 0.005;
+        self.orbit.yaw -= dx as f32 * sens;
+        self.orbit.pitch = (self.orbit.pitch + dy as f32 * sens)
+            .clamp(-1.5, 1.5); // keep just shy of the poles (±~86°)
+        self.refresh_view();
+    }
+
+    /// Handle a scroll delta (dolly in/out).
+    fn zoom(&mut self, scroll: f32) {
+        self.orbit.radius = (self.orbit.radius * (1.0 - scroll * 0.1)).max(1e-2);
+        self.refresh_view();
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -488,7 +523,10 @@ pub async fn run() {
     #[cfg(target_arch = "wasm32")]
     attach_canvas(&window);
 
-    let mut state = State::new(window.clone()).await;
+    let (gaussians, bg) = load_scene();
+    log::info!("loaded {} gaussians", gaussians.len());
+    let mut state = State::new(window.clone(), gaussians, bg).await;
+    state.window.request_redraw();
 
     event_loop
         .run(move |event, elwt| {
@@ -500,6 +538,30 @@ pub async fn run() {
                 match event {
                     WindowEvent::CloseRequested => elwt.exit(),
                     WindowEvent::Resized(new_size) => state.resize(new_size),
+                    WindowEvent::MouseInput { state: btn, button, .. } => {
+                        if button == winit::event::MouseButton::Left {
+                            state.dragging = btn == winit::event::ElementState::Pressed;
+                            if !state.dragging {
+                                state.last_cursor = None;
+                            }
+                        }
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let p = (position.x, position.y);
+                        if state.dragging {
+                            if let Some((lx, ly)) = state.last_cursor {
+                                state.orbit_drag(p.0 - lx, p.1 - ly);
+                            }
+                        }
+                        state.last_cursor = Some(p);
+                    }
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        let scroll = match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                            winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 60.0,
+                        };
+                        state.zoom(scroll);
+                    }
                     WindowEvent::RedrawRequested => match state.render() {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -510,11 +572,29 @@ pub async fn run() {
                     },
                     _ => {}
                 }
-            } else if let Event::AboutToWait = event {
-                state.window.request_redraw();
             }
         })
         .expect("run event loop");
+}
+
+/// Pick the scene: a `.ply` path given on the command line (native), else the synthetic scene.
+fn load_scene() -> (Vec<scene::Gaussian>, Background) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Some(path) = std::env::args().nth(1) {
+            if path.ends_with(".ply") {
+                match scene::load_ply(std::path::Path::new(&path)) {
+                    Ok(g) => {
+                        // Standard .ply has no WSR background; use a dim near-zero default.
+                        let bg = Background { w_b: 0.02, c_b: glam::Vec3::ZERO };
+                        return (g, bg);
+                    }
+                    Err(e) => log::error!("failed to load {path}: {e} — falling back to synthetic"),
+                }
+            }
+        }
+    }
+    scene::synthetic_scene()
 }
 
 fn init_logging() {
