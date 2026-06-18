@@ -266,13 +266,23 @@ pub fn load_view_json(path: &std::path::Path) -> std::io::Result<(Background, Ca
     Ok((Background { w_b: v.background.w_b, c_b: Vec3::from_array(v.background.c_b) }, cam))
 }
 
-/// Load a standard INRIA-3DGS `.ply` (binary-little-endian or ascii). Reads vertex properties by
-/// name: `x y z`, `scale_0..2` (log), `rot_0..3` (quaternion `w,x,y,z`), `f_dc_0..2` (SH-deg0 color),
-/// `opacity` (pre-sigmoid). Any extra properties (normals, `f_rest_*`) are skipped — WSR uses DC only.
+/// Default WSR background for a standard `.ply` (which carries no background): dim, near-zero weight.
+pub fn default_background() -> Background {
+    Background { w_b: 0.02, c_b: Vec3::ZERO }
+}
+
+/// Read a `.ply` from disk and parse it (native convenience over [`parse_ply`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_ply(path: &std::path::Path) -> std::io::Result<Vec<Gaussian>> {
+    parse_ply(&std::fs::read(path)?)
+}
+
+/// Parse a standard INRIA-3DGS `.ply` from bytes (binary-little-endian or ascii). Reads vertex
+/// properties by name: `x y z`, `scale_0..2` (log), `rot_0..3` (quaternion `w,x,y,z`), `f_dc_0..2`
+/// (SH-deg0 color), `opacity` (pre-sigmoid). Extra properties (normals, `f_rest_*`) are skipped —
+/// WSR uses DC only. Available on all targets (no filesystem), so WASM can parse a dropped file.
+pub fn parse_ply(bytes: &[u8]) -> std::io::Result<Vec<Gaussian>> {
     use std::io::{Error, ErrorKind};
-    let bytes = std::fs::read(path)?;
 
     let marker = b"end_header\n";
     let header_end = bytes

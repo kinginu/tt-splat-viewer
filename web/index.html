@@ -17,7 +17,8 @@
 <body>
   <div class="wrap">
     <h3>tt-splat-viewer <span class="hint">— poly-splat + WSR (WebGPU)</span></h3>
-    <p class="hint">Drag to orbit · scroll to zoom. Needs a WebGPU browser (Chrome/Edge, or Safari 17.4+).</p>
+    <p class="hint">Drag to orbit · scroll to zoom · <b>drop a .ply file</b> onto the page to load it.
+      Needs a WebGPU browser (Chrome/Edge, or Safari 17.4+).</p>
     <div id="err"></div>
   </div>
   <script type="module">
@@ -47,13 +48,31 @@
     window.addEventListener('error', (e) => show('[window.error] ', [e.message || e]));
     window.addEventListener('unhandledrejection', (e) => show('[rejection] ', [e.reason]));
 
-    import('./tt_splat_viewer.js').then(({ default: init }) => {
+    import('./tt_splat_viewer.js').then(({ default: init, load_ply_bytes }) => {
       errBox.textContent += 'navigator.gpu present: ' + !!navigator.gpu + '\n';
       if (!navigator.gpu) {
         show('', ['No WebGPU (navigator.gpu undefined). Try Chrome/Edge or Safari 17.4+.']);
         return;
       }
-      return init().then(() => { errBox.textContent += 'wasm module initialized\n'; });
+      return init().then(() => {
+        errBox.textContent += 'wasm module initialized · drop a .ply to load\n';
+
+        // Drag-and-drop a .ply: read bytes, hand them to wasm (parses + swaps the scene).
+        const cancel = (e) => { e.preventDefault(); e.stopPropagation(); };
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach((ev) =>
+          document.addEventListener(ev, cancel, false));
+        document.addEventListener('drop', async (e) => {
+          const file = e.dataTransfer && e.dataTransfer.files[0];
+          if (!file) return;
+          try {
+            const buf = await file.arrayBuffer();
+            const ok = load_ply_bytes(new Uint8Array(buf));
+            errBox.textContent += (ok ? 'loaded ' : 'failed to load ') + file.name + '\n';
+          } catch (err) {
+            show('[drop] ', [err]);
+          }
+        });
+      });
     }).catch((e) => show('[init catch] ', [e]));
   </script>
 </body>

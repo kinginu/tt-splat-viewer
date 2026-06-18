@@ -277,6 +277,18 @@ impl Renderer {
         self.instance_count = instances.len() as u32;
     }
 
+    /// Update the WSR background uniform (used when a newly loaded scene wants a different bg).
+    fn update_background(&self, queue: &wgpu::Queue, bg: &Background) {
+        queue.write_buffer(
+            &self.comp_buf,
+            0,
+            bytemuck::bytes_of(&CompositeRaw {
+                c_b: bg.c_b.to_array(),
+                w_b: bg.w_b,
+            }),
+        );
+    }
+
     fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         // Pass 1: additive splat into the accumulator (cleared to 0).
         {
@@ -455,6 +467,14 @@ impl State {
         }
     }
 
+    /// Replace the scene (e.g. a dropped `.ply`): re-frame the orbit, update bg, re-upload instances.
+    fn set_scene(&mut self, gaussians: Vec<scene::Gaussian>, bg: Background) {
+        self.gaussians = gaussians;
+        self.orbit = scene::Orbit::frame(&self.gaussians);
+        self.renderer.update_background(&self.queue, &bg);
+        self.refresh_view();
+    }
+
     /// Re-run the CPU preprocess for the current orbit camera and re-upload the instances.
     fn refresh_view(&mut self) {
         let cam = self.orbit.camera(self.config.width, self.config.height);
@@ -514,6 +534,35 @@ pub fn wasm_start() {
     wasm_bindgen_futures::spawn_local(run());
 }
 
+// A scene set from JS (a dropped `.ply`) and applied by the event loop on the next tick — the web
+// has no winit file-drop, so the page reads the file and hands us the bytes here.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static PENDING_SCENE: std::cell::RefCell<Option<(Vec<scene::Gaussian>, Background)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Called from JS drag-and-drop with the dropped file's bytes. Returns true if it parsed.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn load_ply_bytes(bytes: &[u8]) -> bool {
+    match scene::parse_ply(bytes) {
+        Ok(g) if !g.is_empty() => {
+            log::info!("dropped .ply: {} gaussians", g.len());
+            PENDING_SCENE.with(|p| *p.borrow_mut() = Some((g, scene::default_background())));
+            true
+        }
+        Ok(_) => {
+            log::error!("dropped .ply has no gaussians");
+            false
+        }
+        Err(e) => {
+            log::error!("failed to parse dropped .ply: {e}");
+            false
+        }
+    }
+}
+
 /// Entry point shared by native (`main.rs`) and WASM (`wasm_start`).
 pub async fn run() {
     init_logging();
@@ -539,6 +588,11 @@ pub async fn run() {
         elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
         // Keep redrawing so a late surface-size (common on web) and orbit moves are always shown.
         if let Event::AboutToWait = event {
+            // Apply a scene handed in from JS drag-and-drop (web has no winit file-drop event).
+            #[cfg(target_arch = "wasm32")]
+            if let Some((g, bg)) = PENDING_SCENE.with(|p| p.borrow_mut().take()) {
+                state.set_scene(g, bg);
+            }
             state.window.request_redraw();
             return;
         }
@@ -549,6 +603,19 @@ pub async fn run() {
             match event {
                 WindowEvent::CloseRequested => elwt.exit(),
                 WindowEvent::Resized(new_size) => state.resize(new_size),
+                #[cfg(not(target_arch = "wasm32"))]
+                WindowEvent::DroppedFile(path) => {
+                    if path.extension().and_then(|e| e.to_str()) == Some("ply") {
+                        match scene::load_ply(&path) {
+                            Ok(g) if !g.is_empty() => {
+                                log::info!("dropped {}: {} gaussians", path.display(), g.len());
+                                state.set_scene(g, scene::default_background());
+                            }
+                            Ok(_) => log::warn!("dropped .ply has no gaussians"),
+                            Err(e) => log::error!("failed to load {}: {e}", path.display()),
+                        }
+                    }
+                }
                 WindowEvent::MouseInput { state: btn, button, .. } => {
                     if button == winit::event::MouseButton::Left {
                         state.dragging = btn == winit::event::ElementState::Pressed;
