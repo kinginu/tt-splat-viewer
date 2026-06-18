@@ -13,6 +13,10 @@
 *.png
 !docs/**/*.png
 
+# generated validation artifacts (reproducible via validation/oracle.py)
+/validation/scene.json
+/Cargo.lock
+
 # editor / os
 .DS_Store
 .idea/

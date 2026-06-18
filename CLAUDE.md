@@ -1,33 +1,41 @@
-# tt-splat-viewer — Handoff for the next Claude Code session
+# tt-splat-viewer — project context for Claude Code
 
-You are starting work in a **fresh, empty repo**. This file is your full context — the prior
-session that created it is not available. Read it top to bottom before writing code.
+Working context for this repo. Read top to bottom before writing code. The public-facing
+`README.md` is deliberately terse; **this file is the real design + math + build plan.**
+
+## Repo / git policy
+
+- Only **source code and this `CLAUDE.md`** are tracked in git. No other docs, notes, or handoff
+  files get committed — keep internal design notes here in `CLAUDE.md`, not in separate `.md` files.
+- This repo: `github.com/kinginu/tt-splat-viewer` (private), MIT.
+- Parent reference (readable, same machine): `../tt-splat` (private, `github.com/kinginu/tt-splat`).
+  Start with `spike/{render,arms,forward,geometry,camera}.py`.
+- Git identity is already set (`kinginu`). Commit/push to `main` when the user asks.
 
 ---
 
 ## 0. What you are building (TL;DR)
 
-A **from-scratch Rust + wgpu + WGSL** interactive viewer for the **"(B) route"** Gaussian-splatting
+A **from-scratch Rust + wgpu + WGSL** interactive viewer for the tt-splat Gaussian-splatting
 renderer: **poly-splat + Weighted Sum Rendering (WSR)** — order-independent, **no depth sort, no
 transcendentals**. Native (desktop) + WASM (browser).
 
 **Purpose (be honest about scope):** this is a *reference / visual de-risk / demo* tool. It runs on a
 normal GPU via wgpu. **It is NOT the performance artifact** — the parent project's perf thesis is about
 running on Tenstorrent Blackhole silicon, which this viewer does not touch. **No perf/$ claim ever comes
-from this repo.** Its job is to let us *see* the (B) model on real scenes and de-risk its known
+from this repo.** Its job is to let us *see* the tt-splat model on real scenes and de-risk its known
 weaknesses (below).
 
 ---
 
 ## 1. Parent project context (`tt-splat`)
 
-- Sibling repo on this machine: **`../tt-splat`** (private, `github.com/kinginu/tt-splat`). You can read it.
-- tt-splat maps 3D Gaussian Splatting onto **Tenstorrent Blackhole**. The "(B) route" swaps standard
-  3DGS's sorted-alpha compositing for a hardware-friendly formulation:
+- tt-splat maps 3D Gaussian Splatting onto **Tenstorrent Blackhole**. The renderer this viewer targets
+  swaps standard 3DGS's sorted-alpha compositing for a hardware-friendly formulation:
   - **No depth sort** → Weighted Sum Rendering (WSR), order-independent.
   - **No transcendentals** → poly-splat weight `(1−Q/k)₊²` instead of `exp(−Q/2)`.
   - **Matmul-shaped** → the quadratic form `Q = Φ·θᵀ` is an exact GEMM.
-- Phase 1 (hardware-independent) is **complete**: the (B) math is de-risked (depth-free WSR ≈ parity
+- Phase 1 (hardware-independent) is **complete**: the math is de-risked (depth-free WSR ≈ parity
   with standard 3DGS on the ficus scene), forward+backward validated on the TT simulator (ttsim), and
   fixed-K binning shown lossless. Everything past that needs real silicon.
 
@@ -48,6 +56,7 @@ over the code — **mirror the code, and verify numerically (§5)**. Key files:
 - `spike/forward.py` — `quad_form` (Q), `poly_splat_wgeo` (w_geo), `color_from_dc`.
 - `spike/arms.py` — **`blend_A`** ← THE renderer to reproduce.
 - `spike/render.py` — the full dense pipeline (geometry → Q → w_geo → blend_A).
+- `spike/camera.py` — camera conventions + `pixel_grid` (pixel centers at `col+0.5, row+0.5`).
 
 **Per frame**, given gaussians `{mean3d, scale, quat, color_dc, opacity_raw}`, learnable background
 `{w_b, c_b}`, and a camera:
@@ -70,7 +79,7 @@ D = Σ_g w              +  w_b                 # denominator
 C = N / D                                     # final pixel color
 ```
 (`blend_A` = `_wsr(o·w_geo, color, w_b, c_b)` with `num = W@color + w_b·c_b`, `den = W.sum + w_b`,
-`C = num/den`.)
+`C = num/den`.) Color is `color_from_dc`: `clamp(0.5 + C0·dc, min=0)`, `C0 = 0.28209479...` (SH deg-0).
 
 **Why this is EASY in wgpu (and why we do NOT fork a sorted-3DGS viewer):** N and D are commutative
 sums, so render every gaussian's footprint with **additive blending** into an `Rgba16Float` target
@@ -94,7 +103,7 @@ later add tiling.
 3. **Lift only isolated plumbing** (with attribution) from **abist-co-ltd/wgpu-gs-viewer** (MIT,
    tag `v-0.1.0`, https://github.com/abist-co-ltd/wgpu-gs-viewer): wgpu/WASM init, `.ply` parsing,
    camera/orbit-fly controls. **Any file you copy/adapt MUST keep its MIT copyright header**
-   (`© 2026 株式会社アビスト イノベーションセンター`). See `LICENSE` / README attribution.
+   (`© 2026 株式会社アビスト イノベーションセンター`). See `LICENSE`.
 4. **Minimal first:** no tiling, no compute pass, no culling — just project → instanced quads with the
    poly+WSR shader + additive blend → fullscreen divide. Add tiling / bounding-radius cull / fixed-K
    binning later, only for the A3 scale tests.
@@ -110,9 +119,9 @@ Two distinct modes:
   with the WSR shader anyway. The result will look "wrong" — WSR averages through occlusion — and
   **that is the point**: it makes the depth-free occlusion failure visible. Fastest path to a picture.
   (Grab any pretrained 3DGS `.ply`, e.g. the abist repo's `scenes/luigi.ply`.)
-- **(b) Faithful (B) viewer (the real artifact):** consume **our** trained gaussians exported from
+- **(b) Faithful viewer (the real artifact):** consume **our** trained gaussians exported from
   tt-splat — `mean3d`, our conic/θ, `color_dc`, `opacity_raw`, `w_b`, `c_b`. This needs a small
-  exporter on the tt-splat side and a matching loader here. This is what actually shows the (B) model.
+  exporter on the tt-splat side and a matching loader here. This is what actually shows the tt-splat model.
 
 ---
 
@@ -131,7 +140,7 @@ Pattern to copy: `../tt-splat/tools/m2_forward_ttsim.py` diffs a *simulator* ren
 
 ---
 
-## 6. Suggested milestones (commit at each)
+## 6. Milestones (commit at each)
 
 1. Skeleton: `cargo run` opens a wgpu window that clears the screen; `wasm-pack`/trunk path builds for
    browser. (Lift wgpu/WASM init from abist, attribution kept.)
@@ -144,12 +153,45 @@ Pattern to copy: `../tt-splat/tools/m2_forward_ttsim.py` diffs a *simulator* ren
    render.
 6. Tiling + bounding-radius cull + fixed-K binning → A3 scale/quality exploration.
 
+When in doubt about the math, **match the PyTorch output numerically (§5)** rather than guessing.
+
 ---
 
-## 7. Logistics
+## Build prerequisites (dev box, one-time)
 
-- This repo: `github.com/kinginu/tt-splat-viewer` (private), MIT.
-- Parent reference (readable, same machine): `../tt-splat`. Start with `spike/{render,arms,forward,geometry}.py`.
-- Git identity is already set (`kinginu`). Commit/push to `main` when the user asks.
-- Keep abist's MIT copyright on any lifted plumbing; our `LICENSE` covers new code.
-- When in doubt about the math, **match the PyTorch output numerically (§5)** rather than guessing.
+The native build needs a C toolchain + the Linux windowing/Vulkan dev libs. Rust is installed
+(rustup, stable). Still missing — install with (needs sudo):
+
+```
+sudo apt-get install -y build-essential pkg-config \
+  libx11-dev libxcursor-dev libxrandr-dev libxi-dev libwayland-dev libxkbcommon-dev \
+  mesa-vulkan-drivers vulkan-tools libvulkan-dev
+```
+
+For the WASM path: `rustup target add wasm32-unknown-unknown` + `cargo install trunk wasm-bindgen-cli`.
+
+## Progress log
+
+- Bootstrap commit: handoff doc + license + scaffolding.
+- Doc reorg: `HANDOFF.md` → this `CLAUDE.md` (git-tracked); README de-jargoned (dropped "(B) route").
+- **M1 (skeleton):** `src/{main,lib}.rs` — winit 0.29 + wgpu 0.20 window, surface, clear/redraw loop;
+  native + WASM (`#[wasm_bindgen(start)]`) entry paths. Cargo set up.
+- **M2 (renderer):** `src/scene.rs` (CPU `project_ewa`/`cov3d`/quat + `color_from_dc` + synthetic
+  3-gaussian scene), `src/shader.wgsl` (poly-splat Q/w_geo + WSR divide), two-pass additive→composite
+  pipeline in `lib.rs`.
+- **M3 (offscreen + PSNR harness) — DONE & PASSING.** `src/offscreen.rs` + `src/bin/offscreen.rs`
+  render `scene.json` headlessly to PNG; `validation/oracle.py` writes the shared `scene.json` and the
+  PyTorch arm-A reference; `validation/psnr.py` diffs them. **Result: PSNR 50.39 dB, max|Δ| = 1/255**
+  (i.e. bit-accurate up to 8-bit quantization — the 50 dB target is saturated by the uint8 output, so
+  no convention bug). Reproduce:
+  ```
+  ../tt-splat/.venv/bin/python validation/oracle.py
+  cargo run --bin offscreen -- validation/scene.json validation/rust.png
+  ../tt-splat/.venv/bin/python validation/psnr.py validation/oracle.png validation/rust.png
+  ```
+  Dev box is **headless** (no DISPLAY) but has an RTX 3090 + Vulkan, so the offscreen path works; the
+  windowed `cargo run` needs a display (untested here).
+- NOT yet done: `.ply` loader (M4 / M2b), the A1 standard-`.ply`-through-WSR demo, the tt-splat
+  exporter + loader for our trained gaussians (M5), real camera intrinsics + orbit/fly controls,
+  tiling/cull/fixed-K (M6). To push PSNR higher than 8-bit allows, diff in float (dump f32 from both).
+- Cargo.lock is gitignored (minimal-tracking policy); flip that if you want reproducible bin builds.
