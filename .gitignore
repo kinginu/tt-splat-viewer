@@ -1,0 +1,19 @@
+# Rust
+/target
+**/*.rs.bk
+
+# wasm / web build output
+/pkg
+/dist
+
+# scenes & generated renders (large / reproducible)
+*.ply
+/scenes
+/out
+*.png
+!docs/**/*.png
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
