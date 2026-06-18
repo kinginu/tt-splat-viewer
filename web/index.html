@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>tt-splat-viewer</title>
+  <style>
+    html, body { margin: 0; background: #0b0b12; color: #cfd2dc;
+      font: 14px/1.5 -apple-system, system-ui, sans-serif; }
+    .wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+    canvas { border: 1px solid #2a2c3a; border-radius: 6px; touch-action: none; }
+    .hint { opacity: 0.7; }
+    code { background: #1a1c28; padding: 1px 5px; border-radius: 4px; }
+    #err { color: #ff8080; white-space: pre-wrap; max-width: 960px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h3>tt-splat-viewer <span class="hint">— poly-splat + WSR (WebGPU)</span></h3>
+    <p class="hint">Drag to orbit · scroll to zoom. Needs a WebGPU browser (Chrome/Edge, or Safari 17.4+).</p>
+    <div id="err"></div>
+  </div>
+  <script type="module">
+    // Compat shim: wgpu 0.20 sends the limit `maxInterStageShaderComponents`, which current Chrome
+    // removed from the WebGPU spec and now rejects in requestDevice(). Strip removed limits here so
+    // device creation succeeds without bumping the wgpu dependency.
+    if (window.GPUAdapter && GPUAdapter.prototype.requestDevice) {
+      const REMOVED = ['maxInterStageShaderComponents'];
+      const orig = GPUAdapter.prototype.requestDevice;
+      GPUAdapter.prototype.requestDevice = function (desc) {
+        if (desc && desc.requiredLimits) {
+          for (const k of REMOVED) delete desc.requiredLimits[k];
+        }
+        return orig.call(this, desc);
+      };
+    }
+
+    // Mirror console errors/warnings onto the page so they show up even in a screenshot.
+    const errBox = document.getElementById('err');
+    const show = (prefix, args) => {
+      errBox.textContent += prefix + Array.from(args).map(String).join(' ') + '\n';
+    };
+    const origErr = console.error.bind(console);
+    const origWarn = console.warn.bind(console);
+    console.error = (...a) => { show('[error] ', a); origErr(...a); };
+    console.warn = (...a) => { show('[warn] ', a); origWarn(...a); };
+    window.addEventListener('error', (e) => show('[window.error] ', [e.message || e]));
+    window.addEventListener('unhandledrejection', (e) => show('[rejection] ', [e.reason]));
+
+    import('./tt_splat_viewer.js').then(({ default: init }) => {
+      errBox.textContent += 'navigator.gpu present: ' + !!navigator.gpu + '\n';
+      if (!navigator.gpu) {
+        show('', ['No WebGPU (navigator.gpu undefined). Try Chrome/Edge or Safari 17.4+.']);
+        return;
+      }
+      return init().then(() => { errBox.textContent += 'wasm module initialized\n'; });
+    }).catch((e) => show('[init catch] ', [e]));
+  </script>
+</body>
+</html>

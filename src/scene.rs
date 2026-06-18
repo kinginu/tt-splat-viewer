@@ -397,6 +397,31 @@ impl Orbit {
     }
 }
 
+/// A procedural demo scene: ~1200 colored gaussians on a Fibonacci sphere (color ← direction).
+/// Pure-compute and deterministic, so it works identically on native and WASM with no asset file —
+/// a denser, orbit-able cloud than `synthetic_scene` for showing the viewer off.
+pub fn demo_scene() -> (Vec<Gaussian>, Background) {
+    let n: usize = 1200;
+    let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt()); // golden angle
+    let mut gaussians = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = (i as f32 + 0.5) / n as f32;
+        let y = 1.0 - 2.0 * t; // -1..1
+        let r = (1.0 - y * y).max(0.0).sqrt();
+        let phi = i as f32 * golden;
+        let pos = Vec3::new(r * phi.cos(), y, r * phi.sin());
+        let col = Vec3::new(0.5 + 0.5 * pos.x, 0.5 + 0.5 * pos.y, 0.5 + 0.5 * pos.z);
+        gaussians.push(Gaussian {
+            mean: pos,
+            log_scale: Vec3::splat(0.06f32.ln()),
+            quat: [1.0, 0.0, 0.0, 0.0],
+            color_dc: (col - Vec3::splat(0.5)) / SH_C0, // invert color_from_dc → color ≈ `col`
+            opacity_raw: 4.0,
+        });
+    }
+    (gaussians, Background { w_b: 0.02, c_b: Vec3::ZERO })
+}
+
 /// A tiny hand-made scene for milestone 2/3: three overlapping gaussians on a gray background.
 /// Deliberately depth-overlapping so the depth-free WSR averaging (weakness A1) is visible.
 pub fn synthetic_scene() -> (Vec<Gaussian>, Background) {

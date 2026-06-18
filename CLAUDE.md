@@ -157,6 +157,29 @@ When in doubt about the math, **match the PyTorch output numerically (§5)** rat
 
 ---
 
+## WASM / browser build (works; verified in Chrome)
+
+The viewer runs in a WebGPU browser. Build + serve:
+
+```
+cargo build --lib --target wasm32-unknown-unknown --release
+wasm-bindgen target/wasm32-unknown-unknown/release/tt_splat_viewer.wasm --out-dir web --target web --no-typescript
+python3 -m http.server 8080 --bind 127.0.0.1 --directory web      # then open http://localhost:8080
+```
+
+- Uses the **WebGPU** backend (Cargo wasm deps drop the `webgl` feature) because the WSR accumulator
+  is `Rgba16Float` with additive blending, which WebGL2 can't reliably render+blend. Needs Chrome/Edge
+  or Safari 17.4+.
+- `web/index.html` (tracked) contains a **compat shim** that strips the `maxInterStageShaderComponents`
+  limit from `GPUAdapter.requestDevice` — wgpu 0.20 still sends it but current Chrome removed it from
+  the spec and rejects the call. Real fix later: bump wgpu. The shim also mirrors console errors onto
+  the page (handy when the only feedback is a screenshot).
+- `web/*.wasm` and `web/*.js` are generated (gitignored); regenerate with the two commands above.
+- On this headless dev box, serving over Tailscale works: `sudo tailscale serve --bg 8080` →
+  `https://<host>.<tailnet>.ts.net/` (HTTPS satisfies WebGPU's secure-context requirement).
+- The default scene (no `.ply` arg, and always on WASM) is `scene::demo_scene()` — a procedural
+  ~1200-gaussian colored sphere (no asset file needed).
+
 ## Build prerequisites (dev box, one-time)
 
 The native build needs a C toolchain + the Linux windowing/Vulkan dev libs. Rust is installed

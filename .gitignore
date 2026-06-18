@@ -2,9 +2,11 @@
 /target
 **/*.rs.bk
 
-# wasm / web build output
+# wasm / web build output (regenerate with the wasm-bindgen step in CLAUDE.md; index.html is tracked)
 /pkg
 /dist
+/web/*.wasm
+/web/*.js
 
 # scenes & generated renders (large / reproducible)
 *.ply

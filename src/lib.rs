@@ -507,8 +507,14 @@ impl State {
     }
 }
 
-/// Entry point shared by native (`main.rs`) and WASM (`#[wasm_bindgen(start)]`).
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
+/// WASM entry: `wasm_bindgen(start)` must be sync, so kick the async `run()` onto the microtask queue.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn wasm_start() {
+    wasm_bindgen_futures::spawn_local(run());
+}
+
+/// Entry point shared by native (`main.rs`) and WASM (`wasm_start`).
 pub async fn run() {
     init_logging();
 
@@ -516,6 +522,7 @@ pub async fn run() {
     let window = Arc::new(
         WindowBuilder::new()
             .with_title("tt-splat-viewer")
+            .with_inner_size(winit::dpi::LogicalSize::new(960.0, 720.0))
             .build(&event_loop)
             .expect("create window"),
     );
@@ -528,53 +535,65 @@ pub async fn run() {
     let mut state = State::new(window.clone(), gaussians, bg).await;
     state.window.request_redraw();
 
-    event_loop
-        .run(move |event, elwt| {
-            elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
-            if let Event::WindowEvent { event, window_id } = event {
-                if window_id != state.window.id() {
-                    return;
-                }
-                match event {
-                    WindowEvent::CloseRequested => elwt.exit(),
-                    WindowEvent::Resized(new_size) => state.resize(new_size),
-                    WindowEvent::MouseInput { state: btn, button, .. } => {
-                        if button == winit::event::MouseButton::Left {
-                            state.dragging = btn == winit::event::ElementState::Pressed;
-                            if !state.dragging {
-                                state.last_cursor = None;
-                            }
-                        }
-                    }
-                    WindowEvent::CursorMoved { position, .. } => {
-                        let p = (position.x, position.y);
-                        if state.dragging {
-                            if let Some((lx, ly)) = state.last_cursor {
-                                state.orbit_drag(p.0 - lx, p.1 - ly);
-                            }
-                        }
-                        state.last_cursor = Some(p);
-                    }
-                    WindowEvent::MouseWheel { delta, .. } => {
-                        let scroll = match delta {
-                            winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                            winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 60.0,
-                        };
-                        state.zoom(scroll);
-                    }
-                    WindowEvent::RedrawRequested => match state.render() {
-                        Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                            state.resize(state.size)
-                        }
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                        Err(e) => log::warn!("surface error: {e:?}"),
-                    },
-                    _ => {}
-                }
+    let handler = move |event: Event<()>, elwt: &winit::event_loop::EventLoopWindowTarget<()>| {
+        elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
+        // Keep redrawing so a late surface-size (common on web) and orbit moves are always shown.
+        if let Event::AboutToWait = event {
+            state.window.request_redraw();
+            return;
+        }
+        if let Event::WindowEvent { event, window_id } = event {
+            if window_id != state.window.id() {
+                return;
             }
-        })
-        .expect("run event loop");
+            match event {
+                WindowEvent::CloseRequested => elwt.exit(),
+                WindowEvent::Resized(new_size) => state.resize(new_size),
+                WindowEvent::MouseInput { state: btn, button, .. } => {
+                    if button == winit::event::MouseButton::Left {
+                        state.dragging = btn == winit::event::ElementState::Pressed;
+                        if !state.dragging {
+                            state.last_cursor = None;
+                        }
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let p = (position.x, position.y);
+                    if state.dragging {
+                        if let Some((lx, ly)) = state.last_cursor {
+                            state.orbit_drag(p.0 - lx, p.1 - ly);
+                        }
+                    }
+                    state.last_cursor = Some(p);
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let scroll = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 60.0,
+                    };
+                    state.zoom(scroll);
+                }
+                WindowEvent::RedrawRequested => match state.render() {
+                    Ok(()) => {}
+                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                        state.resize(state.size)
+                    }
+                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                    Err(e) => log::warn!("surface error: {e:?}"),
+                },
+                _ => {}
+            }
+        }
+    };
+
+    // Native blocks in `run`; web can't block, so hand the loop to the browser via `spawn`.
+    #[cfg(not(target_arch = "wasm32"))]
+    event_loop.run(handler).expect("run event loop");
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::EventLoopExtWebSys;
+        event_loop.spawn(handler);
+    }
 }
 
 /// Pick the scene: a `.ply` path given on the command line (native), else the synthetic scene.
@@ -589,26 +608,26 @@ fn load_scene() -> (Vec<scene::Gaussian>, Background) {
                         let bg = Background { w_b: 0.02, c_b: glam::Vec3::ZERO };
                         return (g, bg);
                     }
-                    Err(e) => log::error!("failed to load {path}: {e} — falling back to synthetic"),
+                    Err(e) => log::error!("failed to load {path}: {e} — falling back to demo scene"),
                 }
             }
         }
     }
-    scene::synthetic_scene()
+    scene::demo_scene()
 }
 
 fn init_logging() {
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "wasm32")] {
             console_error_panic_hook::set_once();
-            let _ = console_log::init_with_level(log::Level::Warn);
+            let _ = console_log::init_with_level(log::Level::Info);
         } else {
             let _ = env_logger::try_init();
         }
     }
 }
 
-/// On the web, winit creates a detached canvas — append it to the page so it is visible.
+/// On the web, winit creates a detached canvas — size it and append it to the page so it is visible.
 #[cfg(target_arch = "wasm32")]
 fn attach_canvas(window: &Window) {
     use winit::platform::web::WindowExtWebSys;
@@ -616,7 +635,9 @@ fn attach_canvas(window: &Window) {
         .and_then(|win| win.document())
         .and_then(|doc| {
             let body = doc.body()?;
-            let canvas = web_sys::Element::from(window.canvas()?);
+            let canvas = window.canvas()?; // web_sys::HtmlCanvasElement
+            canvas.set_width(960);
+            canvas.set_height(720);
             body.append_child(&canvas).ok()?;
             Some(())
         })

@@ -18,7 +18,19 @@ fn main() {
     let out_path = args.next().expect("usage: offscreen <scene.json|model.ply> <out.png> [view.json | --orbit yaw pitch]");
     let third = args.next();
 
-    let (gaussians, bg, cam) = if input.ends_with(".ply") {
+    let (gaussians, bg, cam) = if input == "--demo" {
+        // Procedural demo scene (same as the WASM/native default), auto-framed; optional yaw/pitch.
+        let (g, bg) = scene::demo_scene();
+        let mut orbit = scene::Orbit::frame(&g);
+        if let Some(y) = third {
+            orbit.yaw = y.parse::<f32>().unwrap_or(0.0).to_radians();
+        }
+        if let Some(p) = args.next() {
+            orbit.pitch = p.parse::<f32>().unwrap_or(0.0).to_radians();
+        }
+        let cam = orbit.camera(800, 800);
+        (g, bg, cam)
+    } else if input.ends_with(".ply") {
         let g = scene::load_ply(Path::new(&input)).expect("load .ply");
         match third.as_deref() {
             Some("--orbit") | None => {

@@ -21,7 +21,12 @@ cargo run --release -- path/to/model.ply      # omit the arg for a built-in synt
 
 # Headless render to a PNG (no display needed):
 cargo run --bin offscreen -- model.ply out.png --orbit 45 20   # auto-framed, yaw/pitch in degrees
+
+# Browser (WebGPU) — no native display needed; see CLAUDE.md for the wasm-bindgen + serve steps.
 ```
+
+With no `.ply`, the viewer shows a procedural demo scene (a ~1200-gaussian colored sphere). The
+browser build needs a WebGPU browser (Chrome/Edge, or Safari 17.4+).
 
 A standard INRIA-3DGS `.ply` is rendered through the WSR model directly — see CLAUDE.md §4 on what
 that does and does not show.
