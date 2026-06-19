@@ -28,6 +28,10 @@ pub struct Gaussian {
     pub color_dc: Vec3,
     /// Pre-sigmoid opacity (`opacity_raw`).
     pub opacity_raw: f32,
+    /// Higher-order SH color coefficients (deg 1-3, 15 per channel, channel-major: R×15,G×15,B×15)
+    /// from a standard 3DGS `.ply`'s `f_rest_*`. `None` for DC-only sources (demo, tt-splat exports).
+    /// Used only by the 3DGS pane; WSR ignores it (the tt-splat model is DC-only).
+    pub sh: Option<[f32; 45]>,
 }
 
 /// Learnable WSR background: `C = (Σ w·color + w_b·c_b) / (Σ w + w_b)`.
@@ -138,10 +142,50 @@ fn cov3d(log_scale: Vec3, r: Mat3) -> Mat3 {
     rs * r.transpose()
 }
 
+// Real-SH basis constants (gsplat / INRIA convention; C0..C2 match spike/sh.py, C3 is the deg-3 set).
+const SH_C1: f32 = 0.488_602_5;
+const SH_C2: [f32; 5] = [1.092_548_4, -1.092_548_4, 0.315_391_57, -1.092_548_4, 0.546_274_2];
+const SH_C3: [f32; 7] = [
+    -0.590_043_6, 2.890_611_4, -0.457_045_8, 0.373_176_33, -0.457_045_8, 1.445_305_7, -0.590_043_6,
+];
+
+/// Evaluate standard 3DGS view-dependent color: `clamp(0.5 + Σ Y_i(dir)·coeff_i, 0)` per channel.
+/// `dc` is the DC term, `rest` the 15 higher coeffs per channel (channel-major), `dir` view direction.
+fn eval_sh_color(dc: Vec3, rest: &[f32; 45], dir: Vec3) -> [f32; 3] {
+    let d = dir.normalize_or_zero();
+    let (x, y, z) = (d.x, d.y, d.z);
+    let (xx, yy, zz) = (x * x, y * y, z * z);
+    let (xy, yz, xz) = (x * y, y * z, x * z);
+    let dc = [dc.x, dc.y, dc.z];
+    let mut out = [0.0f32; 3];
+    for c in 0..3 {
+        let s = |k: usize| rest[c * 15 + (k - 1)]; // SH index k = 1..15
+        let mut r = SH_C0 * dc[c];
+        r += -SH_C1 * y * s(1) + SH_C1 * z * s(2) - SH_C1 * x * s(3);
+        r += SH_C2[0] * xy * s(4)
+            + SH_C2[1] * yz * s(5)
+            + SH_C2[2] * (2.0 * zz - xx - yy) * s(6)
+            + SH_C2[3] * xz * s(7)
+            + SH_C2[4] * (xx - yy) * s(8);
+        r += SH_C3[0] * y * (3.0 * xx - yy) * s(9)
+            + SH_C3[1] * xy * z * s(10)
+            + SH_C3[2] * y * (4.0 * zz - xx - yy) * s(11)
+            + SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * s(12)
+            + SH_C3[4] * x * (4.0 * zz - xx - yy) * s(13)
+            + SH_C3[5] * z * (xx - yy) * s(14)
+            + SH_C3[6] * x * (xx - 3.0 * yy) * s(15);
+        out[c] = (r + 0.5).max(0.0);
+    }
+    out
+}
+
 /// Project every gaussian to an `InstanceRaw`; culled gaussians (`keep == false`) are dropped.
 /// Mirrors `geometry.project_ewa` + `forward.color_from_dc` + the opacity sigmoid. `radius_sigma`
 /// sets the quad footprint in σ ([`WSR_SIGMAS`] for poly-splat, [`GS_SIGMAS`] for 3DGS `exp`).
-pub fn preprocess(gaussians: &[Gaussian], cam: &Camera, radius_sigma: f32) -> Vec<InstanceRaw> {
+/// With `eval_sh`, gaussians that carry `sh` coeffs get view-dependent color (the 3DGS pane); WSR
+/// passes `false` for DC-only color (matching the tt-splat oracle).
+pub fn preprocess(gaussians: &[Gaussian], cam: &Camera, radius_sigma: f32, eval_sh: bool) -> Vec<InstanceRaw> {
+    let cam_center = -(cam.r_v.transpose() * cam.t_v); // world-space camera position for view dirs
     let mut out = Vec::with_capacity(gaussians.len());
     for g in gaussians {
         let r = quat_to_rotmat(g.quat);
@@ -190,11 +234,14 @@ pub fn preprocess(gaussians: &[Gaussian], cam: &Camera, radius_sigma: f32) -> Ve
         let half_extent = [radius_sigma * s00.sqrt(), radius_sigma * s11.sqrt()];
 
         let opacity = 1.0 / (1.0 + (-g.opacity_raw).exp());
-        let color = [
-            (0.5 + SH_C0 * g.color_dc.x).max(0.0),
-            (0.5 + SH_C0 * g.color_dc.y).max(0.0),
-            (0.5 + SH_C0 * g.color_dc.z).max(0.0),
-        ];
+        let color = match (eval_sh, &g.sh) {
+            (true, Some(rest)) => eval_sh_color(g.color_dc, rest, g.mean - cam_center),
+            _ => [
+                (0.5 + SH_C0 * g.color_dc.x).max(0.0),
+                (0.5 + SH_C0 * g.color_dc.y).max(0.0),
+                (0.5 + SH_C0 * g.color_dc.z).max(0.0),
+            ],
+        };
 
         out.push(InstanceRaw {
             mu2d,
@@ -210,8 +257,8 @@ pub fn preprocess(gaussians: &[Gaussian], cam: &Camera, radius_sigma: f32) -> Ve
 
 /// Like [`preprocess`] but sorted back-to-front (farthest first) for painter's-order alpha
 /// compositing — the draw order the standard 3DGS renderer needs.
-pub fn preprocess_sorted(gaussians: &[Gaussian], cam: &Camera, radius_sigma: f32) -> Vec<InstanceRaw> {
-    let mut out = preprocess(gaussians, cam, radius_sigma);
+pub fn preprocess_sorted(gaussians: &[Gaussian], cam: &Camera, radius_sigma: f32, eval_sh: bool) -> Vec<InstanceRaw> {
+    let mut out = preprocess(gaussians, cam, radius_sigma, eval_sh);
     out.sort_by(|a, b| b.depth.total_cmp(&a.depth)); // descending depth = far → near
     out
 }
@@ -257,6 +304,7 @@ pub fn load_scene_json(path: &std::path::Path) -> std::io::Result<(Vec<Gaussian>
             quat: g.quat,
             color_dc: Vec3::from_array(g.color_dc),
             opacity_raw: g.opacity_raw,
+            sh: None,
         })
         .collect();
     Ok((gaussians, bg, cam))
@@ -295,8 +343,8 @@ pub fn load_ply(path: &std::path::Path) -> std::io::Result<Vec<Gaussian>> {
 
 /// Parse a standard INRIA-3DGS `.ply` from bytes (binary-little-endian or ascii). Reads vertex
 /// properties by name: `x y z`, `scale_0..2` (log), `rot_0..3` (quaternion `w,x,y,z`), `f_dc_0..2`
-/// (SH-deg0 color), `opacity` (pre-sigmoid). Extra properties (normals, `f_rest_*`) are skipped —
-/// WSR uses DC only. Available on all targets (no filesystem), so WASM can parse a dropped file.
+/// (SH-deg0 color), `opacity` (pre-sigmoid), and `f_rest_*` (higher-order SH, used by the 3DGS pane;
+/// WSR ignores it). Normals are skipped. Available on all targets (no filesystem) for WASM drops.
 pub fn parse_ply(bytes: &[u8]) -> std::io::Result<Vec<Gaussian>> {
     use std::io::{Error, ErrorKind};
 
@@ -349,12 +397,44 @@ pub fn parse_ply(bytes: &[u8]) -> std::io::Result<Vec<Gaussian>> {
     }
     let stride = acc;
 
-    let g_at = |vals: &dyn Fn(&str) -> f32| Gaussian {
+    // Higher-order SH (`f_rest_*`), in index order — standard 3DGS stores them channel-major.
+    let mut rest_cols: Vec<(u32, usize)> = props
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (n, _))| {
+            n.strip_prefix("f_rest_").and_then(|s| s.parse::<u32>().ok()).map(|k| (k, i))
+        })
+        .collect();
+    rest_cols.sort_by_key(|(k, _)| *k);
+    let rest_cols: Vec<usize> = rest_cols.into_iter().map(|(_, i)| i).collect();
+    // Valid only if divisible into 3 channels; per-channel count clamped to deg-3 (15).
+    let per_ch = if !rest_cols.is_empty() && rest_cols.len() % 3 == 0 {
+        (rest_cols.len() / 3).min(15)
+    } else {
+        0
+    };
+    let total_per_ch = rest_cols.len() / 3; // file's actual per-channel stride (may exceed 15)
+
+    let build_sh = |read: &dyn Fn(usize) -> f32| -> Option<[f32; 45]> {
+        if per_ch == 0 {
+            return None;
+        }
+        let mut sh = [0.0f32; 45];
+        for c in 0..3 {
+            for j in 0..per_ch {
+                sh[c * 15 + j] = read(rest_cols[c * total_per_ch + j]);
+            }
+        }
+        Some(sh)
+    };
+
+    let g_at = |vals: &dyn Fn(&str) -> f32, sh: Option<[f32; 45]>| Gaussian {
         mean: Vec3::new(vals("x"), vals("y"), vals("z")),
         log_scale: Vec3::new(vals("scale_0"), vals("scale_1"), vals("scale_2")),
         quat: [vals("rot_0"), vals("rot_1"), vals("rot_2"), vals("rot_3")],
         color_dc: Vec3::new(vals("f_dc_0"), vals("f_dc_1"), vals("f_dc_2")),
         opacity_raw: vals("opacity"),
+        sh,
     };
 
     let mut out = Vec::with_capacity(count);
@@ -362,8 +442,10 @@ pub fn parse_ply(bytes: &[u8]) -> std::io::Result<Vec<Gaussian>> {
         let text = String::from_utf8_lossy(&bytes[data_start..]);
         for line in text.lines().filter(|l| !l.trim().is_empty()).take(count) {
             let nums: Vec<f32> = line.split_whitespace().filter_map(|t| t.parse().ok()).collect();
-            let vals = |name: &str| nums[col[name]];
-            out.push(g_at(&vals));
+            let read = |ci: usize| nums[ci];
+            let vals = |name: &str| read(col[name]);
+            let sh = build_sh(&read);
+            out.push(g_at(&vals, sh));
         }
     } else {
         for i in 0..count {
@@ -371,11 +453,13 @@ pub fn parse_ply(bytes: &[u8]) -> std::io::Result<Vec<Gaussian>> {
             if base + stride > bytes.len() {
                 return Err(Error::new(ErrorKind::UnexpectedEof, "ply body truncated"));
             }
-            let vals = |name: &str| -> f32 {
-                let o = base + offset[col[name]];
+            let read = |ci: usize| -> f32 {
+                let o = base + offset[ci];
                 f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
             };
-            out.push(g_at(&vals));
+            let vals = |name: &str| read(col[name]);
+            let sh = build_sh(&read);
+            out.push(g_at(&vals, sh));
         }
     }
     Ok(out)
@@ -443,6 +527,7 @@ pub fn demo_scene() -> (Vec<Gaussian>, Background) {
             quat: [1.0, 0.0, 0.0, 0.0],
             color_dc: (col - Vec3::splat(0.5)) / SH_C0, // invert color_from_dc → color ≈ `col`
             opacity_raw: 4.0,
+            sh: None,
         });
     }
     (gaussians, Background { w_b: 0.02, c_b: Vec3::ZERO })
@@ -457,6 +542,7 @@ pub fn synthetic_scene() -> (Vec<Gaussian>, Background) {
         quat: [1.0, 0.0, 0.0, 0.0],
         color_dc: (color - Vec3::splat(0.5)) / SH_C0, // invert color_from_dc so color≈`color`
         opacity_raw: op,
+        sh: None,
     };
     let gaussians = vec![
         g(Vec3::new(-0.3, 0.0, 4.0), 0.30, Vec3::new(0.9, 0.2, 0.2), 4.0),

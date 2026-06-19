@@ -62,9 +62,9 @@ fn main() {
     };
 
     let instances = if gs {
-        scene::preprocess_sorted(&gaussians, &cam, scene::GS_SIGMAS)
+        scene::preprocess_sorted(&gaussians, &cam, scene::GS_SIGMAS, true)
     } else {
-        scene::preprocess(&gaussians, &cam, scene::WSR_SIGMAS)
+        scene::preprocess(&gaussians, &cam, scene::WSR_SIGMAS, false)
     };
     eprintln!(
         "rendering {} gaussians ({} kept) at {}x{} [{}]",

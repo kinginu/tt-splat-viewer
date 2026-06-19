@@ -606,11 +606,11 @@ impl Pane {
         let color_view = make_color_target(device, width, height);
         let (wsr, gs) = match method {
             Method::Wsr => {
-                let inst = scene::preprocess(&gaussians, cam, scene::WSR_SIGMAS);
+                let inst = scene::preprocess(&gaussians, cam, scene::WSR_SIGMAS, false);
                 (Some(Renderer::new(device, PANE_FORMAT, width, height, &inst, bg)), None)
             }
             Method::Gs => {
-                let inst = scene::preprocess_sorted(&gaussians, cam, scene::GS_SIGMAS);
+                let inst = scene::preprocess_sorted(&gaussians, cam, scene::GS_SIGMAS, true);
                 (None, Some(GsRenderer::new(device, PANE_FORMAT, width, height, &inst, bg)))
             }
         };
@@ -619,8 +619,8 @@ impl Pane {
 
     fn instances_for(&self, cam: &scene::Camera) -> Vec<InstanceRaw> {
         match self.method {
-            Method::Wsr => scene::preprocess(&self.gaussians, cam, scene::WSR_SIGMAS),
-            Method::Gs => scene::preprocess_sorted(&self.gaussians, cam, scene::GS_SIGMAS),
+            Method::Wsr => scene::preprocess(&self.gaussians, cam, scene::WSR_SIGMAS, false),
+            Method::Gs => scene::preprocess_sorted(&self.gaussians, cam, scene::GS_SIGMAS, true),
         }
     }
 

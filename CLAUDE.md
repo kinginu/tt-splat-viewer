@@ -184,7 +184,8 @@ python3 -m http.server 8080 --bind 127.0.0.1 --directory web      # then open ht
 
 The window/canvas is split into two synced panes: **left = WSR** (the tt-splat/BH method, `Renderer`),
 **right = standard 3DGS** (`GsRenderer`: `exp(−Q/2)`, depth-sorted "over" alpha — mirrors
-`spike/arms.render_D`, DC color only, **SH deg>0 not yet evaluated**). Both share one `Orbit` camera
+`spike/arms.render_D`, with **view-dependent SH deg-3 color** from a real `.ply`'s `f_rest_*`).
+Both share one `Orbit` camera
 (automatic sync). Each pane renders into its own `Rgba8Unorm` target; `blit.wgsl` places them
 side-by-side with a divider.
 
@@ -194,7 +195,15 @@ side-by-side with a divider.
   picks left or right. Either pane works empty/independently; default is the demo sphere in both.
 - Offscreen check: `offscreen --gs --demo out.png` renders the 3DGS pane headlessly (occlusion looks
   solid vs WSR's averaged look). WSR PSNR vs oracle unchanged (50.39 dB) after the refactor.
-- TODO before merge polish: evaluate SH deg-3 for the 3DGS pane (parse `f_rest_*`), per-pane labels.
+- **SH (deg-3) color** for the 3DGS pane: `scene::parse_ply` reads `f_rest_*` (channel-major) into
+  `Gaussian.sh`; `preprocess(..., eval_sh=true)` evaluates `eval_sh_color` at the view dir (WSR passes
+  `false` → DC only, so the tt-splat oracle still matches). Cross-checked vs an independent eval:
+  `validation/sh_check.py` (1-gaussian known `f_rest`) → center pixel max|Δ| = 0.002.
+  ```
+  ../tt-splat/.venv/bin/python validation/sh_check.py
+  cargo run --bin offscreen -- --gs validation/model_sh.ply validation/sh.png validation/view_sh.json
+  ../tt-splat/.venv/bin/python validation/sh_check.py --compare
+  ```
 
 ## Build prerequisites (dev box, one-time)
 
