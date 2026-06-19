@@ -107,8 +107,15 @@ pub struct InstanceRaw {
     pub opacity: f32,
     /// Final RGB color `clamp(0.5 + C0·dc, 0)`.
     pub color: [f32; 3],
-    pub _pad: f32,
+    /// Camera-space depth (z). Not a vertex attribute — used to depth-sort for the 3DGS renderer.
+    pub depth: f32,
 }
+
+/// Footprint radius (in standard deviations) for the poly-splat WSR quad: `sqrt(k)` so the quad
+/// exactly covers the `Q < k` support. `half_extent = WSR_SIGMAS · sqrt(Σ_ii)`.
+pub const WSR_SIGMAS: f32 = 2.0; // sqrt(K) with K = 4
+/// Footprint radius for the 3DGS `exp(−Q/2)` quad — 3σ captures the exponential tail.
+pub const GS_SIGMAS: f32 = 3.0;
 
 /// `quat_to_rotmat` (`[w,x,y,z]`, normalized). Mirrors `geometry.quat_to_rotmat`.
 fn quat_to_rotmat(q: [f32; 4]) -> Mat3 {
@@ -132,8 +139,9 @@ fn cov3d(log_scale: Vec3, r: Mat3) -> Mat3 {
 }
 
 /// Project every gaussian to an `InstanceRaw`; culled gaussians (`keep == false`) are dropped.
-/// Mirrors `geometry.project_ewa` + `forward.color_from_dc` + the opacity sigmoid.
-pub fn preprocess(gaussians: &[Gaussian], cam: &Camera) -> Vec<InstanceRaw> {
+/// Mirrors `geometry.project_ewa` + `forward.color_from_dc` + the opacity sigmoid. `radius_sigma`
+/// sets the quad footprint in σ ([`WSR_SIGMAS`] for poly-splat, [`GS_SIGMAS`] for 3DGS `exp`).
+pub fn preprocess(gaussians: &[Gaussian], cam: &Camera, radius_sigma: f32) -> Vec<InstanceRaw> {
     let mut out = Vec::with_capacity(gaussians.len());
     for g in gaussians {
         let r = quat_to_rotmat(g.quat);
@@ -178,8 +186,8 @@ pub fn preprocess(gaussians: &[Gaussian], cam: &Camera) -> Vec<InstanceRaw> {
         let det = (s00 * s11 - s01 * s01).max(1e-12);
         let conic = [s11 / det, -s01 / det, s00 / det]; // (a, b, c)
 
-        // Footprint half-extent: the ellipse {dᵀ M d ≤ k} is axis-bounded by sqrt(k·Sigma2d_ii).
-        let half_extent = [(K * s00).sqrt(), (K * s11).sqrt()];
+        // Footprint half-extent: `radius_sigma` standard deviations along each axis (σ_ii = sqrt(Σ_ii)).
+        let half_extent = [radius_sigma * s00.sqrt(), radius_sigma * s11.sqrt()];
 
         let opacity = 1.0 / (1.0 + (-g.opacity_raw).exp());
         let color = [
@@ -194,9 +202,17 @@ pub fn preprocess(gaussians: &[Gaussian], cam: &Camera) -> Vec<InstanceRaw> {
             conic,
             opacity,
             color,
-            _pad: 0.0,
+            depth,
         });
     }
+    out
+}
+
+/// Like [`preprocess`] but sorted back-to-front (farthest first) for painter's-order alpha
+/// compositing — the draw order the standard 3DGS renderer needs.
+pub fn preprocess_sorted(gaussians: &[Gaussian], cam: &Camera, radius_sigma: f32) -> Vec<InstanceRaw> {
+    let mut out = preprocess(gaussians, cam, radius_sigma);
+    out.sort_by(|a, b| b.depth.total_cmp(&a.depth)); // descending depth = far → near
     out
 }
 

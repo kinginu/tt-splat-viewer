@@ -13,9 +13,15 @@ use tt_splat_viewer::{offscreen, scene};
 
 fn main() {
     let _ = env_logger::try_init();
-    let mut args = std::env::args().skip(1);
-    let input = args.next().expect("usage: offscreen <scene.json|model.ply> <out.png> [view.json | --orbit yaw pitch]");
-    let out_path = args.next().expect("usage: offscreen <scene.json|model.ply> <out.png> [view.json | --orbit yaw pitch]");
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Optional leading --gs flag renders with the standard-3DGS pipeline instead of WSR.
+    let gs = args.first().map(String::as_str) == Some("--gs");
+    if gs {
+        args.remove(0);
+    }
+    let mut args = args.into_iter();
+    let input = args.next().expect("usage: offscreen [--gs] <scene.json|model.ply|--demo> <out.png> [view.json | yaw pitch]");
+    let out_path = args.next().expect("usage: offscreen [--gs] <scene.json|model.ply|--demo> <out.png> [view.json | yaw pitch]");
     let third = args.next();
 
     let (gaussians, bg, cam) = if input == "--demo" {
@@ -55,16 +61,21 @@ fn main() {
         scene::load_scene_json(Path::new(&input)).expect("load scene.json")
     };
 
-    let instances = scene::preprocess(&gaussians, &cam);
+    let instances = if gs {
+        scene::preprocess_sorted(&gaussians, &cam, scene::GS_SIGMAS)
+    } else {
+        scene::preprocess(&gaussians, &cam, scene::WSR_SIGMAS)
+    };
     eprintln!(
-        "rendering {} gaussians ({} kept) at {}x{}",
+        "rendering {} gaussians ({} kept) at {}x{} [{}]",
         gaussians.len(),
         instances.len(),
         cam.width,
-        cam.height
+        cam.height,
+        if gs { "3DGS" } else { "WSR" }
     );
 
-    let (w, h, rgba) = pollster::block_on(offscreen::render(&cam, &instances, &bg));
+    let (w, h, rgba) = pollster::block_on(offscreen::render(&cam, &instances, &bg, gs));
     image::RgbaImage::from_raw(w, h, rgba)
         .expect("build image")
         .save(&out_path)

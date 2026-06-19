@@ -374,7 +374,329 @@ fn make_composite_bg(
     })
 }
 
-/// Window + surface + the WSR renderer + the interactive orbit scene.
+/// Per-pane intermediate color target (linear `Rgba8Unorm`; the side-by-side blit reads these).
+const PANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+fn make_color_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("pane color target"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PANE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Split a surface width into (left pane, right pane) widths.
+fn split_widths(width: u32) -> (u32, u32) {
+    let left = (width / 2).max(1);
+    (left, (width - width / 2).max(1))
+}
+
+/// Which compositing model a pane renders with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Method {
+    /// Poly-splat + Weighted Sum Rendering (the tt-splat / BH method).
+    Wsr,
+    /// Standard 3DGS: `exp(−Q/2)`, depth-sorted alpha compositing (the original method).
+    Gs,
+}
+
+/// Standard 3DGS renderer: depth-sorted instances drawn with `exp(−Q/2)` alpha and "over" blending.
+struct GsRenderer {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    globals_buf: wgpu::Buffer,
+    instance_buf: wgpu::Buffer,
+    instance_count: u32,
+    clear: wgpu::Color,
+}
+
+impl GsRenderer {
+    fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        instances: &[InstanceRaw],
+        bg: &Background,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("gs shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gs.wgsl").into()),
+        });
+        let globals_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gs globals"),
+            contents: bytemuck::bytes_of(&GlobalsRaw {
+                viewport: [width as f32, height as f32],
+                _pad: [0.0, 0.0],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("gs globals bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gs globals bg"),
+            layout: &bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: globals_buf.as_entire_binding(),
+            }],
+        });
+        let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gs instances"),
+            contents: bytemuck::cast_slice(instances),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![
+                0 => Float32x2, 1 => Float32x2, 2 => Float32x3, 3 => Float32, 4 => Float32x3,
+            ],
+        };
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("gs layout"),
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        });
+        // Painter's-order "over": rgb = src·a + dst·(1−a), a = src.a + dst.a·(1−a).
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("gs pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_gs",
+                buffers: &[instance_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_gs",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        Self {
+            pipeline,
+            bind_group,
+            globals_buf,
+            instance_buf,
+            instance_count: instances.len() as u32,
+            clear: bg_clear(bg),
+        }
+    }
+
+    fn update_instances(&mut self, device: &wgpu::Device, instances: &[InstanceRaw]) {
+        self.instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gs instances"),
+            contents: bytemuck::cast_slice(instances),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        self.instance_count = instances.len() as u32;
+    }
+
+    fn update_background(&mut self, bg: &Background) {
+        self.clear = bg_clear(bg);
+    }
+
+    fn resize(&self, queue: &wgpu::Queue, width: u32, height: u32) {
+        queue.write_buffer(
+            &self.globals_buf,
+            0,
+            bytemuck::bytes_of(&GlobalsRaw {
+                viewport: [width as f32, height as f32],
+                _pad: [0.0, 0.0],
+            }),
+        );
+    }
+
+    fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("gs pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(self.clear),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.instance_buf.slice(..));
+        pass.draw(0..4, 0..self.instance_count);
+    }
+}
+
+fn bg_clear(bg: &Background) -> wgpu::Color {
+    wgpu::Color {
+        r: bg.c_b.x as f64,
+        g: bg.c_b.y as f64,
+        b: bg.c_b.z as f64,
+        a: 1.0,
+    }
+}
+
+/// A render pane: a gaussian set, the renderer it uses, and the color target it draws into.
+struct Pane {
+    method: Method,
+    gaussians: Vec<scene::Gaussian>,
+    color_view: wgpu::TextureView,
+    wsr: Option<Renderer>,
+    gs: Option<GsRenderer>,
+}
+
+impl Pane {
+    fn new(
+        device: &wgpu::Device,
+        method: Method,
+        gaussians: Vec<scene::Gaussian>,
+        bg: &Background,
+        cam: &scene::Camera,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let color_view = make_color_target(device, width, height);
+        let (wsr, gs) = match method {
+            Method::Wsr => {
+                let inst = scene::preprocess(&gaussians, cam, scene::WSR_SIGMAS);
+                (Some(Renderer::new(device, PANE_FORMAT, width, height, &inst, bg)), None)
+            }
+            Method::Gs => {
+                let inst = scene::preprocess_sorted(&gaussians, cam, scene::GS_SIGMAS);
+                (None, Some(GsRenderer::new(device, PANE_FORMAT, width, height, &inst, bg)))
+            }
+        };
+        Pane { method, gaussians, color_view, wsr, gs }
+    }
+
+    fn instances_for(&self, cam: &scene::Camera) -> Vec<InstanceRaw> {
+        match self.method {
+            Method::Wsr => scene::preprocess(&self.gaussians, cam, scene::WSR_SIGMAS),
+            Method::Gs => scene::preprocess_sorted(&self.gaussians, cam, scene::GS_SIGMAS),
+        }
+    }
+
+    /// Re-run the CPU preprocess for `cam` and re-upload (called on every camera move).
+    fn update_camera(&mut self, device: &wgpu::Device, cam: &scene::Camera) {
+        let inst = self.instances_for(cam);
+        match (&mut self.wsr, &mut self.gs) {
+            (Some(r), _) => r.update_instances(device, &inst),
+            (_, Some(r)) => r.update_instances(device, &inst),
+            _ => {}
+        }
+    }
+
+    /// Replace this pane's gaussians + background (camera refresh happens separately).
+    fn set_scene(&mut self, queue: &wgpu::Queue, gaussians: Vec<scene::Gaussian>, bg: &Background) {
+        self.gaussians = gaussians;
+        match (&self.wsr, &mut self.gs) {
+            (Some(r), _) => r.update_background(queue, bg),
+            (_, Some(r)) => r.update_background(bg),
+            _ => {}
+        }
+    }
+
+    fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cam: &scene::Camera,
+        width: u32,
+        height: u32,
+    ) {
+        self.color_view = make_color_target(device, width, height);
+        match (&mut self.wsr, &self.gs) {
+            (Some(r), _) => r.resize(device, queue, width, height),
+            (_, Some(r)) => r.resize(queue, width, height),
+            _ => {}
+        }
+        self.update_camera(device, cam);
+    }
+
+    fn draw(&self, encoder: &mut wgpu::CommandEncoder) {
+        match (&self.wsr, &self.gs) {
+            (Some(r), _) => r.draw(encoder, &self.color_view),
+            (_, Some(r)) => r.draw(encoder, &self.color_view),
+            _ => {}
+        }
+    }
+}
+
+/// `split` uniform for the blit (left pane width in pixels; 16-byte aligned).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SplitRaw {
+    left_w: u32,
+    _pad: [u32; 3],
+}
+
+fn make_blit_bg(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    a: &wgpu::TextureView,
+    b: &wgpu::TextureView,
+    split: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("blit bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(a) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(b) },
+            wgpu::BindGroupEntry { binding: 2, resource: split.as_entire_binding() },
+        ],
+    })
+}
+
+/// Window + surface + the two render panes + the shared orbit camera.
 struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -382,9 +704,15 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     window: Arc<Window>,
-    renderer: Renderer,
 
-    gaussians: Vec<scene::Gaussian>,
+    pane_a: Pane, // left: WSR
+    pane_b: Pane, // right: standard 3DGS
+
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_bgl: wgpu::BindGroupLayout,
+    blit_bind_group: wgpu::BindGroup,
+    split_buf: wgpu::Buffer,
+
     orbit: scene::Orbit,
     dragging: bool,
     last_cursor: Option<(f64, f64)>,
@@ -446,11 +774,84 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        // Frame the scene with an orbit camera and preprocess for the initial view.
+        // Left pane = WSR (the given scene); right pane = standard 3DGS (a demo until a .ply is dropped).
+        let (left_w, right_w) = split_widths(config.width);
+        let h = config.height.max(1);
         let orbit = scene::Orbit::frame(&gaussians);
-        let cam = orbit.camera(config.width, config.height);
-        let instances = scene::preprocess(&gaussians, &cam);
-        let renderer = Renderer::new(&device, format, config.width, config.height, &instances, &bg);
+        let cam_a = orbit.camera(left_w, h);
+        let cam_b = orbit.camera(right_w, h);
+        let pane_a = Pane::new(&device, Method::Wsr, gaussians, &bg, &cam_a, left_w, h);
+        let (demo_g, demo_bg) = scene::demo_scene();
+        let pane_b = Pane::new(&device, Method::Gs, demo_g, &demo_bg, &cam_b, right_w, h);
+
+        // Side-by-side blit pipeline (samples the two pane color targets into the surface halves).
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blit shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
+        });
+        let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("blit bgl"),
+            entries: &[
+                tex_entry(0),
+                tex_entry(1),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let split_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("split"),
+            contents: bytemuck::bytes_of(&SplitRaw { left_w, _pad: [0; 3] }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("blit layout"),
+            bind_group_layouts: &[&blit_bgl],
+            push_constant_ranges: &[],
+        });
+        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blit pipeline"),
+            layout: Some(&blit_layout),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: "vs_blit",
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: "fs_blit",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        let blit_bind_group =
+            make_blit_bg(&device, &blit_bgl, &pane_a.color_view, &pane_b.color_view, &split_buf);
 
         State {
             surface,
@@ -459,40 +860,68 @@ impl State {
             config,
             size,
             window,
-            renderer,
-            gaussians,
+            pane_a,
+            pane_b,
+            blit_pipeline,
+            blit_bgl,
+            blit_bind_group,
+            split_buf,
             orbit,
             dragging: false,
             last_cursor: None,
         }
     }
 
-    /// Replace the scene (e.g. a dropped `.ply`): re-frame the orbit, update bg, re-upload instances.
-    fn set_scene(&mut self, gaussians: Vec<scene::Gaussian>, bg: Background) {
-        self.gaussians = gaussians;
-        self.orbit = scene::Orbit::frame(&self.gaussians);
-        self.renderer.update_background(&self.queue, &bg);
+    /// Replace one pane's scene (e.g. a dropped `.ply`): re-frame the shared orbit, refresh both panes.
+    fn set_scene_pane(&mut self, pane: usize, gaussians: Vec<scene::Gaussian>, bg: Background) {
+        self.orbit = scene::Orbit::frame(&gaussians);
+        if pane == 0 {
+            self.pane_a.set_scene(&self.queue, gaussians, &bg);
+        } else {
+            self.pane_b.set_scene(&self.queue, gaussians, &bg);
+        }
         self.refresh_view();
     }
 
-    /// Re-run the CPU preprocess for the current orbit camera and re-upload the instances.
+    /// Re-run the CPU preprocess for both panes at the current shared camera.
     fn refresh_view(&mut self) {
-        let cam = self.orbit.camera(self.config.width, self.config.height);
-        let instances = scene::preprocess(&self.gaussians, &cam);
-        self.renderer.update_instances(&self.device, &instances);
+        let (left_w, right_w) = split_widths(self.config.width);
+        let h = self.config.height.max(1);
+        let cam_a = self.orbit.camera(left_w, h);
+        let cam_b = self.orbit.camera(right_w, h);
+        self.pane_a.update_camera(&self.device, &cam_a);
+        self.pane_b.update_camera(&self.device, &cam_b);
         self.window.request_redraw();
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
-            self.renderer
-                .resize(&self.device, &self.queue, new_size.width, new_size.height);
-            self.refresh_view();
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
         }
+        self.size = new_size;
+        self.config.width = new_size.width;
+        self.config.height = new_size.height;
+        self.surface.configure(&self.device, &self.config);
+
+        let (left_w, right_w) = split_widths(new_size.width);
+        let h = new_size.height;
+        let cam_a = self.orbit.camera(left_w, h);
+        let cam_b = self.orbit.camera(right_w, h);
+        self.pane_a.resize(&self.device, &self.queue, &cam_a, left_w, h);
+        self.pane_b.resize(&self.device, &self.queue, &cam_b, right_w, h);
+        self.queue.write_buffer(
+            &self.split_buf,
+            0,
+            bytemuck::bytes_of(&SplitRaw { left_w, _pad: [0; 3] }),
+        );
+        self.blit_bind_group = make_blit_bg(
+            &self.device,
+            &self.blit_bgl,
+            &self.pane_a.color_view,
+            &self.pane_b.color_view,
+            &self.split_buf,
+        );
+        self.window.request_redraw();
     }
 
     /// Handle a mouse-drag delta (orbit) — yaw/pitch around the target.
@@ -520,10 +949,42 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
-        self.renderer.draw(&mut encoder, &view);
+        // Each pane renders into its own color target, then the blit pass places them side by side.
+        self.pane_a.draw(&mut encoder);
+        self.pane_b.draw(&mut encoder);
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blit pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &self.blit_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
+    }
+
+    /// Which pane a cursor x-coordinate (physical px) is over: 0 = left (WSR), 1 = right (3DGS).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pane_at_x(&self, x: f64) -> usize {
+        let (left_w, _) = split_widths(self.config.width);
+        if x < left_w as f64 {
+            0
+        } else {
+            1
+        }
     }
 }
 
@@ -534,22 +995,24 @@ pub fn wasm_start() {
     wasm_bindgen_futures::spawn_local(run());
 }
 
-// A scene set from JS (a dropped `.ply`) and applied by the event loop on the next tick — the web
-// has no winit file-drop, so the page reads the file and hands us the bytes here.
+// A (pane, scene) set from JS (a dropped `.ply`) and applied by the event loop on the next tick —
+// the web has no winit file-drop, so the page reads the file and hands us the pane + bytes here.
 #[cfg(target_arch = "wasm32")]
 thread_local! {
-    static PENDING_SCENE: std::cell::RefCell<Option<(Vec<scene::Gaussian>, Background)>> =
+    static PENDING_SCENE: std::cell::RefCell<Option<(usize, Vec<scene::Gaussian>, Background)>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Called from JS drag-and-drop with the dropped file's bytes. Returns true if it parsed.
+/// Called from JS drag-and-drop with the target pane (0 = left/WSR, 1 = right/3DGS) and file bytes.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn load_ply_bytes(bytes: &[u8]) -> bool {
+pub fn load_ply_into(pane: u32, bytes: &[u8]) -> bool {
     match scene::parse_ply(bytes) {
         Ok(g) if !g.is_empty() => {
-            log::info!("dropped .ply: {} gaussians", g.len());
-            PENDING_SCENE.with(|p| *p.borrow_mut() = Some((g, scene::default_background())));
+            log::info!("dropped .ply into pane {pane}: {} gaussians", g.len());
+            let pane = (pane as usize).min(1);
+            PENDING_SCENE
+                .with(|p| *p.borrow_mut() = Some((pane, g, scene::default_background())));
             true
         }
         Ok(_) => {
@@ -571,7 +1034,7 @@ pub async fn run() {
     let window = Arc::new(
         WindowBuilder::new()
             .with_title("tt-splat-viewer")
-            .with_inner_size(winit::dpi::LogicalSize::new(960.0, 720.0))
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
             .build(&event_loop)
             .expect("create window"),
     );
@@ -590,8 +1053,8 @@ pub async fn run() {
         if let Event::AboutToWait = event {
             // Apply a scene handed in from JS drag-and-drop (web has no winit file-drop event).
             #[cfg(target_arch = "wasm32")]
-            if let Some((g, bg)) = PENDING_SCENE.with(|p| p.borrow_mut().take()) {
-                state.set_scene(g, bg);
+            if let Some((pane, g, bg)) = PENDING_SCENE.with(|p| p.borrow_mut().take()) {
+                state.set_scene_pane(pane, g, bg);
             }
             state.window.request_redraw();
             return;
@@ -606,10 +1069,12 @@ pub async fn run() {
                 #[cfg(not(target_arch = "wasm32"))]
                 WindowEvent::DroppedFile(path) => {
                     if path.extension().and_then(|e| e.to_str()) == Some("ply") {
+                        // Route to the pane under the cursor (left = WSR, right = 3DGS).
+                        let pane = state.last_cursor.map_or(0, |(x, _)| state.pane_at_x(x));
                         match scene::load_ply(&path) {
                             Ok(g) if !g.is_empty() => {
-                                log::info!("dropped {}: {} gaussians", path.display(), g.len());
-                                state.set_scene(g, scene::default_background());
+                                log::info!("dropped {} → pane {pane}: {} gaussians", path.display(), g.len());
+                                state.set_scene_pane(pane, g, scene::default_background());
                             }
                             Ok(_) => log::warn!("dropped .ply has no gaussians"),
                             Err(e) => log::error!("failed to load {}: {e}", path.display()),
@@ -703,7 +1168,7 @@ fn attach_canvas(window: &Window) {
         .and_then(|doc| {
             let body = doc.body()?;
             let canvas = window.canvas()?; // web_sys::HtmlCanvasElement
-            canvas.set_width(960);
+            canvas.set_width(1280);
             canvas.set_height(720);
             body.append_child(&canvas).ok()?;
             Some(())

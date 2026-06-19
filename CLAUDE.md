@@ -180,6 +180,22 @@ python3 -m http.server 8080 --bind 127.0.0.1 --directory web      # then open ht
 - The default scene (no `.ply` arg, and always on WASM) is `scene::demo_scene()` — a procedural
   ~1200-gaussian colored sphere (no asset file needed).
 
+## Dual-pane comparison view (branch `dual-pane-viewer`)
+
+The window/canvas is split into two synced panes: **left = WSR** (the tt-splat/BH method, `Renderer`),
+**right = standard 3DGS** (`GsRenderer`: `exp(−Q/2)`, depth-sorted "over" alpha — mirrors
+`spike/arms.render_D`, DC color only, **SH deg>0 not yet evaluated**). Both share one `Orbit` camera
+(automatic sync). Each pane renders into its own `Rgba8Unorm` target; `blit.wgsl` places them
+side-by-side with a divider.
+
+- `scene::preprocess` gained a `radius_sigma` arg ([`WSR_SIGMAS`]=2 / [`GS_SIGMAS`]=3 footprint);
+  `preprocess_sorted` returns far→near order for painter's-order alpha. `InstanceRaw._pad` → `depth`.
+- Drag-and-drop is per-pane: the drop x-position (JS `load_ply_into(pane,bytes)` / native cursor)
+  picks left or right. Either pane works empty/independently; default is the demo sphere in both.
+- Offscreen check: `offscreen --gs --demo out.png` renders the 3DGS pane headlessly (occlusion looks
+  solid vs WSR's averaged look). WSR PSNR vs oracle unchanged (50.39 dB) after the refactor.
+- TODO before merge polish: evaluate SH deg-3 for the 3DGS pane (parse `f_rest_*`), per-pane labels.
+
 ## Build prerequisites (dev box, one-time)
 
 The native build needs a C toolchain + the Linux windowing/Vulkan dev libs. Rust is installed

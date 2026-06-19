@@ -4,7 +4,7 @@
 //! (linear, NOT sRGB — so the stored bytes are `round(C·255)`, matching the oracle's
 //! `(img.clamp(0,1)*255)`), copy it back, and return row-major RGBA8.
 
-use crate::{scene::Background, scene::Camera, scene::InstanceRaw, Renderer};
+use crate::{scene::Background, scene::Camera, scene::InstanceRaw, GsRenderer, Renderer};
 
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -13,7 +13,8 @@ fn align_up(value: u32, align: u32) -> u32 {
 }
 
 /// Render `instances` (already preprocessed for `cam`) headlessly. Returns `(width, height, rgba8)`.
-pub async fn render(cam: &Camera, instances: &[InstanceRaw], bg: &Background) -> (u32, u32, Vec<u8>) {
+/// `gs = true` uses the standard-3DGS renderer (instances must be depth-sorted), else WSR.
+pub async fn render(cam: &Camera, instances: &[InstanceRaw], bg: &Background, gs: bool) -> (u32, u32, Vec<u8>) {
     let (width, height) = (cam.width, cam.height);
 
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -41,7 +42,9 @@ pub async fn render(cam: &Camera, instances: &[InstanceRaw], bg: &Background) ->
         .await
         .expect("request device (offscreen)");
 
-    let renderer = Renderer::new(&device, TARGET_FORMAT, width, height, instances, bg);
+    // One of the two renderers (boxed as a closure to keep the readback path shared).
+    let wsr = (!gs).then(|| Renderer::new(&device, TARGET_FORMAT, width, height, instances, bg));
+    let gsr = gs.then(|| GsRenderer::new(&device, TARGET_FORMAT, width, height, instances, bg));
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen target"),
@@ -71,7 +74,11 @@ pub async fn render(cam: &Camera, instances: &[InstanceRaw], bg: &Background) ->
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("offscreen encoder"),
     });
-    renderer.draw(&mut encoder, &target_view);
+    match (&wsr, &gsr) {
+        (Some(r), _) => r.draw(&mut encoder, &target_view),
+        (_, Some(r)) => r.draw(&mut encoder, &target_view),
+        _ => unreachable!(),
+    }
     encoder.copy_texture_to_buffer(
         wgpu::ImageCopyTexture {
             texture: &target,
