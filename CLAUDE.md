@@ -201,7 +201,10 @@ side-by-side with a divider.
   scene via tt-splat's own `plyio` and PSNR-matches the viewer's WSR to tt-splat `render()` at
   **61.92 dB** (black bg both sides). Not a renderer bug — a missing-background-metadata data issue.
 - Offscreen check: `offscreen --gs --demo out.png` renders the 3DGS pane headlessly (occlusion looks
-  solid vs WSR's averaged look). WSR PSNR vs oracle unchanged (50.39 dB) after the refactor.
+  solid vs WSR's averaged look). `offscreen --dual out.png` renders the **full two-pane path**
+  (two `Pane`s + blit, like the window) so the dual view is verifiable on the headless box without a
+  browser. WSR PSNR vs oracle unchanged (50.39 dB) after the refactor.
+- Default sample (no `.ply`): `scene::synthetic_scene()` — the 3 single-color gaussians, in both panes.
 - **SH (deg-3) color** for the 3DGS pane: `scene::parse_ply` reads `f_rest_*` (channel-major) into
   `Gaussian.sh`; `preprocess(..., eval_sh=true)` evaluates `eval_sh_color` at the view dir (WSR passes
   `false` → DC only, so the tt-splat oracle still matches). Cross-checked vs an independent eval:

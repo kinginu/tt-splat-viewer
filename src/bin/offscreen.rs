@@ -20,8 +20,18 @@ fn main() {
         args.remove(0);
     }
     let mut args = args.into_iter();
-    let input = args.next().expect("usage: offscreen [--gs] <scene.json|model.ply|--demo> <out.png> [view.json | yaw pitch]");
-    let out_path = args.next().expect("usage: offscreen [--gs] <scene.json|model.ply|--demo> <out.png> [view.json | yaw pitch]");
+    let input = args.next().expect("usage: offscreen [--gs] <scene.json|model.ply|--demo|--dual> <out.png> [view.json | yaw pitch]");
+    let out_path = args.next().expect("usage: offscreen [--gs] <scene.json|model.ply|--demo|--dual> <out.png> [view.json | yaw pitch]");
+
+    // --dual: render the full two-pane path (WSR | 3DGS) of the default sample, like the window does.
+    if input == "--dual" {
+        let (g, bg) = scene::synthetic_scene();
+        let (w, h, rgba) = pollster::block_on(offscreen::render_dual(&g, &g, &bg, 1280, 720));
+        image::RgbaImage::from_raw(w, h, rgba).expect("image").save(&out_path).expect("save");
+        eprintln!("wrote {out_path} (dual)");
+        return;
+    }
+
     let third = args.next();
 
     let (gaussians, bg, cam) = if input == "--demo" {

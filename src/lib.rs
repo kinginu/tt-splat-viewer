@@ -795,7 +795,8 @@ impl State {
         let cam_a = orbit.camera(left_w, h);
         let cam_b = orbit.camera(right_w, h);
         let pane_a = Pane::new(&device, Method::Wsr, gaussians, &bg, &cam_a, left_w, h);
-        let (demo_g, demo_bg) = scene::demo_scene();
+        // Right pane shows the same default sample so both renderers are compared on identical input.
+        let (demo_g, demo_bg) = scene::synthetic_scene();
         let pane_b = Pane::new(&device, Method::Gs, demo_g, &demo_bg, &cam_b, right_w, h);
 
         // Side-by-side blit pipeline (samples the two pane color targets into the surface halves).
@@ -1186,12 +1187,12 @@ fn load_scene() -> (Vec<scene::Gaussian>, Background) {
                         let bg = Background { w_b: 0.02, c_b: glam::Vec3::ZERO };
                         return (g, bg);
                     }
-                    Err(e) => log::error!("failed to load {path}: {e} — falling back to demo scene"),
+                    Err(e) => log::error!("failed to load {path}: {e} — falling back to sample scene"),
                 }
             }
         }
     }
-    scene::demo_scene()
+    scene::synthetic_scene()
 }
 
 fn init_logging() {
