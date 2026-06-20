@@ -377,6 +377,15 @@ fn make_composite_bg(
 /// Per-pane intermediate color target (linear `Rgba8Unorm`; the side-by-side blit reads these).
 const PANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Background presets cycled with the `b` key: `(w_b, c_b)`. White matches tt-splat's training
+/// (`c_b`=1, `w_b`=softplus(-3)≈0.049): route-B `.ply`s carry no background, and their white
+/// "empty-space" gaussians only vanish on a white background. (`w_b` affects WSR only.)
+const BG_PRESETS: [(f32, [f32; 3]); 3] = [
+    (0.02, [0.0, 0.0, 0.0]),    // black
+    (0.0486, [1.0, 1.0, 1.0]),  // white — tt-splat route-B training background
+    (0.02, [0.10, 0.10, 0.12]), // dark slate
+];
+
 fn make_color_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
@@ -634,9 +643,13 @@ impl Pane {
         }
     }
 
-    /// Replace this pane's gaussians + background (camera refresh happens separately).
-    fn set_scene(&mut self, queue: &wgpu::Queue, gaussians: Vec<scene::Gaussian>, bg: &Background) {
+    /// Replace this pane's gaussians (camera refresh + background applied separately).
+    fn set_scene(&mut self, gaussians: Vec<scene::Gaussian>) {
         self.gaussians = gaussians;
+    }
+
+    /// Update just the background (WSR uses `w_b` + `c_b`; the 3DGS pane uses `c_b` as its clear).
+    fn set_background(&mut self, queue: &wgpu::Queue, bg: &Background) {
         match (&self.wsr, &mut self.gs) {
             (Some(r), _) => r.update_background(queue, bg),
             (_, Some(r)) => r.update_background(bg),
@@ -714,6 +727,7 @@ struct State {
     split_buf: wgpu::Buffer,
 
     orbit: scene::Orbit,
+    bg_preset: usize,
     dragging: bool,
     last_cursor: Option<(f64, f64)>,
 }
@@ -867,20 +881,32 @@ impl State {
             blit_bind_group,
             split_buf,
             orbit,
+            bg_preset: 0,
             dragging: false,
             last_cursor: None,
         }
     }
 
+    fn current_bg(&self) -> Background {
+        let (w_b, c_b) = BG_PRESETS[self.bg_preset];
+        Background { w_b, c_b: glam::Vec3::from_array(c_b) }
+    }
+
     /// Replace one pane's scene (e.g. a dropped `.ply`): re-frame the shared orbit, refresh both panes.
-    fn set_scene_pane(&mut self, pane: usize, gaussians: Vec<scene::Gaussian>, bg: Background) {
+    fn set_scene_pane(&mut self, pane: usize, gaussians: Vec<scene::Gaussian>) {
         self.orbit = scene::Orbit::frame(&gaussians);
-        if pane == 0 {
-            self.pane_a.set_scene(&self.queue, gaussians, &bg);
-        } else {
-            self.pane_b.set_scene(&self.queue, gaussians, &bg);
-        }
+        let pane = if pane == 0 { &mut self.pane_a } else { &mut self.pane_b };
+        pane.set_scene(gaussians);
         self.refresh_view();
+    }
+
+    /// Cycle the shared background preset (the `b` key); applied to both panes.
+    fn cycle_background(&mut self) {
+        self.bg_preset = (self.bg_preset + 1) % BG_PRESETS.len();
+        let bg = self.current_bg();
+        self.pane_a.set_background(&self.queue, &bg);
+        self.pane_b.set_background(&self.queue, &bg);
+        self.window.request_redraw();
     }
 
     /// Re-run the CPU preprocess for both panes at the current shared camera.
@@ -995,12 +1021,13 @@ pub fn wasm_start() {
     wasm_bindgen_futures::spawn_local(run());
 }
 
-// A (pane, scene) set from JS (a dropped `.ply`) and applied by the event loop on the next tick —
-// the web has no winit file-drop, so the page reads the file and hands us the pane + bytes here.
+// Actions from JS (the web has no winit file-drop / reliable canvas key focus), applied by the event
+// loop on the next tick: a dropped scene (pane + gaussians) and a background-cycle request.
 #[cfg(target_arch = "wasm32")]
 thread_local! {
-    static PENDING_SCENE: std::cell::RefCell<Option<(usize, Vec<scene::Gaussian>, Background)>> =
+    static PENDING_SCENE: std::cell::RefCell<Option<(usize, Vec<scene::Gaussian>)>> =
         const { std::cell::RefCell::new(None) };
+    static PENDING_BG_CYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Called from JS drag-and-drop with the target pane (0 = left/WSR, 1 = right/3DGS) and file bytes.
@@ -1011,8 +1038,7 @@ pub fn load_ply_into(pane: u32, bytes: &[u8]) -> bool {
         Ok(g) if !g.is_empty() => {
             log::info!("dropped .ply into pane {pane}: {} gaussians", g.len());
             let pane = (pane as usize).min(1);
-            PENDING_SCENE
-                .with(|p| *p.borrow_mut() = Some((pane, g, scene::default_background())));
+            PENDING_SCENE.with(|p| *p.borrow_mut() = Some((pane, g)));
             true
         }
         Ok(_) => {
@@ -1024,6 +1050,13 @@ pub fn load_ply_into(pane: u32, bytes: &[u8]) -> bool {
             false
         }
     }
+}
+
+/// Called from JS (the `b` key) to cycle the background preset.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn cycle_background() {
+    PENDING_BG_CYCLE.with(|c| c.set(true));
 }
 
 /// Entry point shared by native (`main.rs`) and WASM (`wasm_start`).
@@ -1051,10 +1084,15 @@ pub async fn run() {
         elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
         // Keep redrawing so a late surface-size (common on web) and orbit moves are always shown.
         if let Event::AboutToWait = event {
-            // Apply a scene handed in from JS drag-and-drop (web has no winit file-drop event).
+            // Apply actions handed in from JS (web has no winit file-drop / reliable key focus).
             #[cfg(target_arch = "wasm32")]
-            if let Some((pane, g, bg)) = PENDING_SCENE.with(|p| p.borrow_mut().take()) {
-                state.set_scene_pane(pane, g, bg);
+            {
+                if let Some((pane, g)) = PENDING_SCENE.with(|p| p.borrow_mut().take()) {
+                    state.set_scene_pane(pane, g);
+                }
+                if PENDING_BG_CYCLE.with(|c| c.replace(false)) {
+                    state.cycle_background();
+                }
             }
             state.window.request_redraw();
             return;
@@ -1074,11 +1112,19 @@ pub async fn run() {
                         match scene::load_ply(&path) {
                             Ok(g) if !g.is_empty() => {
                                 log::info!("dropped {} → pane {pane}: {} gaussians", path.display(), g.len());
-                                state.set_scene_pane(pane, g, scene::default_background());
+                                state.set_scene_pane(pane, g);
                             }
                             Ok(_) => log::warn!("dropped .ply has no gaussians"),
                             Err(e) => log::error!("failed to load {}: {e}", path.display()),
                         }
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                WindowEvent::KeyboardInput { event: key_event, .. } => {
+                    if key_event.state == winit::event::ElementState::Pressed
+                        && matches!(key_event.logical_key.as_ref(), winit::keyboard::Key::Character("b"))
+                    {
+                        state.cycle_background();
                     }
                 }
                 WindowEvent::MouseInput { state: btn, button, .. } => {

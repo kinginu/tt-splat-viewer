@@ -193,6 +193,13 @@ side-by-side with a divider.
   `preprocess_sorted` returns far→near order for painter's-order alpha. `InstanceRaw._pad` → `depth`.
 - Drag-and-drop is per-pane: the drop x-position (JS `load_ply_into(pane,bytes)` / native cursor)
   picks left or right. Either pane works empty/independently; default is the demo sphere in both.
+- **Background `b`-toggle** (black / white / slate; `BG_PRESETS`). White = tt-splat's training bg.
+  **Route-B `.ply` background gotcha (verified):** `spike/plyio.save_ply` does NOT store `w_b`/`c_b`,
+  and route-B models train with `c_b`=white, `w_b`=softplus(-3)≈0.049 (`spike/model.py`). The viewer
+  defaults to black, so the model's white "empty-space" gaussians show as a white haze — press `b`
+  for white and they vanish. The WSR *method* is correct: `validation/verify_routeb.py` exports a
+  scene via tt-splat's own `plyio` and PSNR-matches the viewer's WSR to tt-splat `render()` at
+  **61.92 dB** (black bg both sides). Not a renderer bug — a missing-background-metadata data issue.
 - Offscreen check: `offscreen --gs --demo out.png` renders the 3DGS pane headlessly (occlusion looks
   solid vs WSR's averaged look). WSR PSNR vs oracle unchanged (50.39 dB) after the refactor.
 - **SH (deg-3) color** for the 3DGS pane: `scene::parse_ply` reads `f_rest_*` (channel-major) into
