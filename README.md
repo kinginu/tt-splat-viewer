@@ -25,8 +25,20 @@ cargo run --bin offscreen -- model.ply out.png --orbit 45 20   # auto-framed, ya
 # Browser (WebGPU) — no native display needed; see CLAUDE.md for the wasm-bindgen + serve steps.
 ```
 
-With no `.ply`, the viewer shows a procedural demo scene (a ~1200-gaussian colored sphere). The
-browser build needs a WebGPU browser (Chrome/Edge, or Safari 17.4+).
+### Run it in a browser with no Rust toolchain
+
+The prebuilt WebGPU bundle is committed under `web/` (wasm + js), so any machine can host it with just
+a static server — no Rust, no build step:
+
+```sh
+git pull
+cd web && python3 -m http.server 8000     # python3 ships with macOS
+# open http://localhost:8000 in Chrome/Edge (or Safari 17.4+)
+```
+
+`localhost` is a WebGPU secure context, so no HTTPS is needed. The wasm is `wasm32` (CPU-arch neutral),
+so the bundle built on x86 Linux runs as-is on an Apple-Silicon Mac. With no `.ply` the viewer shows the
+built-in sample (3 gaussians); drag a `.ply` (e.g. the bundled `web/sample.ply`) onto a pane to load it.
 
 A standard INRIA-3DGS `.ply` is rendered through the WSR model directly — see CLAUDE.md §4 on what
 that does and does not show.

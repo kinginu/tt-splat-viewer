@@ -2,14 +2,15 @@
 /target
 **/*.rs.bk
 
-# wasm / web build output (regenerate with the wasm-bindgen step in CLAUDE.md; index.html is tracked)
+# wasm / web build output
 /pkg
 /dist
-/web/*.wasm
-/web/*.js
+# NOTE: web/ (wasm+js+sample.ply) IS tracked so a Rust-less machine can `git pull` + static-serve it.
+# Regenerate the wasm/js with the wasm-bindgen step in CLAUDE.md and re-commit them after code changes.
 
 # scenes & generated renders (large / reproducible)
 *.ply
+!/web/sample.ply
 /scenes
 /out
 *.png
