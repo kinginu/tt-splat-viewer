@@ -57,13 +57,16 @@
     window.addEventListener('error', (e) => show('[window.error] ', [e.message || e]));
     window.addEventListener('unhandledrejection', (e) => show('[rejection] ', [e.reason]));
 
-    import('./tt_splat_viewer.js').then(({ default: init, load_ply_into, cycle_background, view_basis }) => {
+    // Cache-bust both the JS module and the wasm so a redeploy is never served stale (no-store only
+    // covers the HTML; the module loader caches the .js/.wasm separately).
+    const V = Date.now();
+    import('./tt_splat_viewer.js?v=' + V).then(({ default: init, load_ply_into, cycle_background, view_basis }) => {
       errBox.textContent += 'navigator.gpu present: ' + !!navigator.gpu + '\n';
       if (!navigator.gpu) {
         show('', ['No WebGPU (navigator.gpu undefined). Try Chrome/Edge or Safari 17.4+.']);
         return;
       }
-      return init().then(() => {
+      return init('./tt_splat_viewer_bg.wasm?v=' + V).then(() => {
         errBox.textContent += 'wasm module initialized · drop a .ply onto a pane · press b for background\n';
 
         // Background cycle (winit canvas key focus is unreliable on web, so drive it from JS).
