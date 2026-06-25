@@ -5,7 +5,7 @@
 //! See `CLAUDE.md` §2. Numbers here must match the oracle — verify via the PSNR harness (§5), not by eye.
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat3, Vec3};
+use glam::{Mat3, Quat, Vec3};
 
 /// Poly-splat width constant `k` (spike uses 4.0). Also referenced as a `const` in the shader.
 pub const K: f32 = 4.0;
@@ -56,6 +56,16 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// Project a world point to clip-space NDC `[-1,1]²` (same projection as the gaussians), plus its
+    /// camera-space depth. Straight 3D lines stay straight under this, so it's exact for axis lines.
+    pub fn project_ndc(&self, p: Vec3) -> ([f32; 2], f32) {
+        let pc = self.r_v * p + self.t_v;
+        let z = pc.z.max(1e-4);
+        let px = self.fx * pc.x / z + self.cx;
+        let py = self.fy * pc.y / z + self.cy;
+        ([2.0 * px / self.width as f32 - 1.0, 1.0 - 2.0 * py / self.height as f32], pc.z)
+    }
+
     /// Build directly from a world→cam rotation `r_v` (row-major 9) + translation `t_v`.
     pub fn from_rt(r_v: [f32; 9], t_v: [f32; 3], fx: f32, fy: f32, cx: f32, cy: f32, width: u32, height: u32) -> Self {
         // r_v is row-major; glam Mat3::from_cols wants columns.
@@ -465,12 +475,12 @@ pub fn parse_ply(bytes: &[u8]) -> std::io::Result<Vec<Gaussian>> {
     Ok(out)
 }
 
-/// An orbit camera: rotate `yaw`/`pitch` around `target` at `radius`, vertical fov `fovy` (radians).
+/// A trackball/orbit camera. Orientation is a quaternion (not yaw/pitch Euler angles) so rotation is
+/// **unlimited in every direction** — no pole clamp, you can roll the model right over the top.
 #[derive(Clone, Copy, Debug)]
 pub struct Orbit {
     pub target: Vec3,
-    pub yaw: f32,
-    pub pitch: f32,
+    pub orientation: Quat,
     pub radius: f32,
     pub fovy: f32,
 }
@@ -480,7 +490,7 @@ impl Orbit {
     pub fn frame(gaussians: &[Gaussian]) -> Self {
         let fovy = 60f32.to_radians();
         if gaussians.is_empty() {
-            return Orbit { target: Vec3::ZERO, yaw: 0.0, pitch: 0.0, radius: 5.0, fovy };
+            return Orbit { target: Vec3::ZERO, orientation: Quat::IDENTITY, radius: 5.0, fovy };
         }
         let centroid = gaussians.iter().map(|g| g.mean).sum::<Vec3>() / gaussians.len() as f32;
         let bound = gaussians
@@ -490,20 +500,34 @@ impl Orbit {
             .max(1e-3);
         // distance so the bounding sphere fits the vertical fov, with margin.
         let radius = 1.4 * bound / (fovy * 0.5).sin();
-        Orbit { target: centroid, yaw: 0.0, pitch: 0.0, radius, fovy }
+        Orbit { target: centroid, orientation: Quat::IDENTITY, radius, fovy }
     }
 
-    /// Eye position for the current orbit angles (OpenCV: looking toward +forward, +y down handled by `look_at`).
+    /// Eye position: the camera sits a `radius` back along the oriented view direction.
     pub fn eye(&self) -> Vec3 {
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
-        let dir = Vec3::new(cp * sy, sp, cp * cy);
-        self.target - dir * self.radius
+        self.target - (self.orientation * Vec3::Z) * self.radius
+    }
+
+    /// Apply a mouse-drag delta (pixels): yaw about world-up, pitch about the current right axis.
+    /// Both are world-space pre-multiplications, so the camera can pass over the poles freely.
+    pub fn rotate(&mut self, dx: f32, dy: f32) {
+        let sens = 0.005;
+        let right = self.orientation * Vec3::X;
+        let yaw = Quat::from_axis_angle(Vec3::Y, -dx * sens);
+        let pitch = Quat::from_axis_angle(right, -dy * sens);
+        self.orientation = (yaw * pitch * self.orientation).normalize();
+    }
+
+    /// Set orientation from yaw/pitch angles (radians) — used by the offscreen `--orbit` renders.
+    pub fn set_angles(&mut self, yaw: f32, pitch: f32) {
+        self.orientation =
+            Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, pitch);
     }
 
     pub fn camera(&self, width: u32, height: u32) -> Camera {
+        let up = self.orientation * Vec3::Y;
         let focal = (height as f32 * 0.5) / (self.fovy * 0.5).tan();
-        Camera::look_at(self.eye(), self.target, Vec3::new(0.0, 1.0, 0.0), focal, focal, width, height)
+        Camera::look_at(self.eye(), self.target, up, focal, focal, width, height)
     }
 }
 

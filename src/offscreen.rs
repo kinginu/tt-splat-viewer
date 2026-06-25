@@ -136,6 +136,8 @@ pub async fn render_dual(
     bg: &Background,
     width: u32,
     height: u32,
+    yaw_deg: f32,
+    pitch_deg: f32,
 ) -> (u32, u32, Vec<u8>) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -155,11 +157,16 @@ pub async fn render_dual(
         .expect("request device (dual)");
 
     let (left_w, right_w) = split_widths(width);
-    let orbit = crate::scene::Orbit::frame(left);
+    let mut orbit = crate::scene::Orbit::frame(left);
+    orbit.set_angles(yaw_deg.to_radians(), pitch_deg.to_radians());
+    // Project the gizmo at the scene center after panes are built.
+    let (ax_origin, ax_len) = (orbit.target, orbit.radius * 0.4);
     let cam_a = orbit.camera(left_w, height);
     let cam_b = orbit.camera(right_w, height);
     let pane_a = Pane::new(&device, Method::Wsr, left.to_vec(), bg, &cam_a, left_w, height);
     let pane_b = Pane::new(&device, Method::Gs, right.to_vec(), bg, &cam_b, right_w, height);
+    pane_a.update_axes(&queue, &cam_a, ax_origin, ax_len);
+    pane_b.update_axes(&queue, &cam_b, ax_origin, ax_len);
 
     // Blit pipeline (same as State::new, target = TARGET_FORMAT for readback).
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {

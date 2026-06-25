@@ -593,6 +593,120 @@ fn bg_clear(bg: &Background) -> wgpu::Color {
     }
 }
 
+/// One vertex of the XYZ axis gizmo: NDC position + RGB color.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct AxesVertex {
+    pos: [f32; 2],
+    color: [f32; 3],
+}
+
+/// XYZ axis gizmo: 3 colored line segments (X=red, Y=green, Z=blue) drawn over a pane. Endpoints are
+/// projected to NDC on the CPU each camera move, so this just uploads 6 vertices and draws lines.
+struct Axes {
+    pipeline: wgpu::RenderPipeline,
+    vbuf: wgpu::Buffer,
+}
+
+impl Axes {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("axes shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("axes.wgsl").into()),
+        });
+        // 3 axes × 2 triangles × 3 verts = 18 (each axis is a thin quad so it's visible, not 1px).
+        let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("axes vbuf"),
+            size: (std::mem::size_of::<AxesVertex>() * 18) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("axes layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("axes pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_axes",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<AxesVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_axes",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(), // TriangleList
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        Axes { pipeline, vbuf }
+    }
+
+    /// Re-project the gizmo for `cam`: axes of length `len` centered at `origin` (world space). Each
+    /// axis is a thin quad (≈2px) in NDC so it stays visible over the gaussians.
+    fn update(&self, queue: &wgpu::Queue, cam: &scene::Camera, origin: glam::Vec3, len: f32) {
+        let axes = [
+            (glam::Vec3::X, [1.0, 0.25, 0.25]),
+            (glam::Vec3::Y, [0.3, 1.0, 0.3]),
+            (glam::Vec3::Z, [0.45, 0.6, 1.0]),
+        ];
+        let hw = 0.005; // half-width in NDC (~2px tall on a 720 pane)
+        let o = glam::Vec2::from_array(cam.project_ndc(origin).0);
+        let mut v = [AxesVertex { pos: [0.0; 2], color: [0.0; 3] }; 18];
+        for (i, (dir, color)) in axes.iter().enumerate() {
+            let t = glam::Vec2::from_array(cam.project_ndc(origin + *dir * len).0);
+            let d = t - o;
+            // perpendicular offset; degenerate (axis pointing at the camera) collapses to nothing.
+            let n = if d.length() > 1e-5 {
+                glam::Vec2::new(-d.y, d.x).normalize() * hw
+            } else {
+                glam::Vec2::ZERO
+            };
+            let q = [o - n, t - n, o + n, t + n]; // quad corners
+            let tri = [q[0], q[1], q[2], q[2], q[1], q[3]];
+            for (j, p) in tri.iter().enumerate() {
+                v[i * 6 + j] = AxesVertex { pos: p.to_array(), color: *color };
+            }
+        }
+        queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&v));
+    }
+
+    fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("axes pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load, // draw over the pane's gaussians
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.vbuf.slice(..));
+        pass.draw(0..18, 0..1);
+    }
+}
+
 /// A render pane: a gaussian set, the renderer it uses, and the color target it draws into.
 struct Pane {
     method: Method,
@@ -600,6 +714,7 @@ struct Pane {
     color_view: wgpu::TextureView,
     wsr: Option<Renderer>,
     gs: Option<GsRenderer>,
+    axes: Axes,
 }
 
 impl Pane {
@@ -623,7 +738,13 @@ impl Pane {
                 (None, Some(GsRenderer::new(device, PANE_FORMAT, width, height, &inst, bg)))
             }
         };
-        Pane { method, gaussians, color_view, wsr, gs }
+        let axes = Axes::new(device, PANE_FORMAT);
+        Pane { method, gaussians, color_view, wsr, gs, axes }
+    }
+
+    /// Re-project the XYZ gizmo (axes of length `len` at world `origin`) for `cam`.
+    fn update_axes(&self, queue: &wgpu::Queue, cam: &scene::Camera, origin: glam::Vec3, len: f32) {
+        self.axes.update(queue, cam, origin, len);
     }
 
     fn instances_for(&self, cam: &scene::Camera) -> Vec<InstanceRaw> {
@@ -680,6 +801,7 @@ impl Pane {
             (_, Some(r)) => r.draw(encoder, &self.color_view),
             _ => {}
         }
+        self.axes.draw(encoder, &self.color_view); // gizmo over the gaussians
     }
 }
 
@@ -798,6 +920,9 @@ impl State {
         // Right pane shows the same default sample so both renderers are compared on identical input.
         let (demo_g, demo_bg) = scene::synthetic_scene();
         let pane_b = Pane::new(&device, Method::Gs, demo_g, &demo_bg, &cam_b, right_w, h);
+        let (ax_origin, ax_len) = (orbit.target, orbit.radius * 0.4);
+        pane_a.update_axes(&queue, &cam_a, ax_origin, ax_len);
+        pane_b.update_axes(&queue, &cam_b, ax_origin, ax_len);
 
         // Side-by-side blit pipeline (samples the two pane color targets into the surface halves).
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -910,14 +1035,22 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// Re-run the CPU preprocess for both panes at the current shared camera.
+    /// World origin + length for the XYZ gizmo (scene center, ~0.4× the framing radius).
+    fn axis_params(&self) -> (glam::Vec3, f32) {
+        (self.orbit.target, self.orbit.radius * 0.4)
+    }
+
+    /// Re-run the CPU preprocess for both panes at the current shared camera (+ re-project the gizmo).
     fn refresh_view(&mut self) {
         let (left_w, right_w) = split_widths(self.config.width);
         let h = self.config.height.max(1);
         let cam_a = self.orbit.camera(left_w, h);
         let cam_b = self.orbit.camera(right_w, h);
+        let (origin, len) = self.axis_params();
         self.pane_a.update_camera(&self.device, &cam_a);
         self.pane_b.update_camera(&self.device, &cam_b);
+        self.pane_a.update_axes(&self.queue, &cam_a, origin, len);
+        self.pane_b.update_axes(&self.queue, &cam_b, origin, len);
         self.window.request_redraw();
     }
 
@@ -936,6 +1069,9 @@ impl State {
         let cam_b = self.orbit.camera(right_w, h);
         self.pane_a.resize(&self.device, &self.queue, &cam_a, left_w, h);
         self.pane_b.resize(&self.device, &self.queue, &cam_b, right_w, h);
+        let (origin, len) = self.axis_params();
+        self.pane_a.update_axes(&self.queue, &cam_a, origin, len);
+        self.pane_b.update_axes(&self.queue, &cam_b, origin, len);
         self.queue.write_buffer(
             &self.split_buf,
             0,
@@ -951,12 +1087,9 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// Handle a mouse-drag delta (orbit) — yaw/pitch around the target.
+    /// Handle a mouse-drag delta (orbit) — unlimited rotation in any direction (no pole clamp).
     fn orbit_drag(&mut self, dx: f64, dy: f64) {
-        let sens = 0.005;
-        self.orbit.yaw -= dx as f32 * sens;
-        self.orbit.pitch = (self.orbit.pitch + dy as f32 * sens)
-            .clamp(-1.5, 1.5); // keep just shy of the poles (±~86°)
+        self.orbit.rotate(dx as f32, dy as f32);
         self.refresh_view();
     }
 

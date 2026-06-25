@@ -26,7 +26,9 @@ fn main() {
     // --dual: render the full two-pane path (WSR | 3DGS) of the default sample, like the window does.
     if input == "--dual" {
         let (g, bg) = scene::synthetic_scene();
-        let (w, h, rgba) = pollster::block_on(offscreen::render_dual(&g, &g, &bg, 1280, 720));
+        let yaw = args.next().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+        let pitch = args.next().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+        let (w, h, rgba) = pollster::block_on(offscreen::render_dual(&g, &g, &bg, 1280, 720, yaw, pitch));
         image::RgbaImage::from_raw(w, h, rgba).expect("image").save(&out_path).expect("save");
         eprintln!("wrote {out_path} (dual)");
         return;
@@ -38,12 +40,9 @@ fn main() {
         // Procedural demo scene (same as the WASM/native default), auto-framed; optional yaw/pitch.
         let (g, bg) = scene::demo_scene();
         let mut orbit = scene::Orbit::frame(&g);
-        if let Some(y) = third {
-            orbit.yaw = y.parse::<f32>().unwrap_or(0.0).to_radians();
-        }
-        if let Some(p) = args.next() {
-            orbit.pitch = p.parse::<f32>().unwrap_or(0.0).to_radians();
-        }
+        let yaw = third.and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0).to_radians();
+        let pitch = args.next().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0).to_radians();
+        orbit.set_angles(yaw, pitch);
         let cam = orbit.camera(800, 800);
         (g, bg, cam)
     } else if input.ends_with(".ply") {
@@ -53,12 +52,9 @@ fn main() {
                 // Auto-frame via the same Orbit the interactive window uses.
                 let (w, h) = (800u32, 800u32);
                 let mut orbit = scene::Orbit::frame(&g);
-                if let Some(y) = args.next() {
-                    orbit.yaw = y.parse::<f32>().unwrap_or(0.0).to_radians();
-                }
-                if let Some(p) = args.next() {
-                    orbit.pitch = p.parse::<f32>().unwrap_or(0.0).to_radians();
-                }
+                let yaw = args.next().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0).to_radians();
+                let pitch = args.next().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0).to_radians();
+                orbit.set_angles(yaw, pitch);
                 let bg = scene::Background { w_b: 0.02, c_b: glam::Vec3::ZERO };
                 (g, bg, orbit.camera(w, h))
             }

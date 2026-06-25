@@ -205,6 +205,12 @@ side-by-side with a divider.
   (two `Pane`s + blit, like the window) so the dual view is verifiable on the headless box without a
   browser. WSR PSNR vs oracle unchanged (50.39 dB) after the refactor.
 - Default sample (no `.ply`): `scene::synthetic_scene()` — the 3 single-color gaussians, in both panes.
+- **Camera**: `Orbit` is quaternion-based (`orientation: Quat`), so drag-rotation is **unlimited** in
+  every direction (yaw about world-up, pitch about the current right axis; no pole clamp). `set_angles`
+  reconstructs it from yaw/pitch for the offscreen `--orbit`/`--dual` renders.
+- **XYZ gizmo** (`Axes`, `axes.wgsl`): X=red, Y=green, Z=blue thin quads at the scene center, endpoints
+  CPU-projected via `Camera::project_ndc` and drawn over each pane (synced). `offscreen --dual out.png
+  [yaw pitch]` renders the gizmo too.
 - **SH (deg-3) color** for the 3DGS pane: `scene::parse_ply` reads `f_rest_*` (channel-major) into
   `Gaussian.sh`; `preprocess(..., eval_sh=true)` evaluates `eval_sh_color` at the view dir (WSR passes
   `false` → DC only, so the tt-splat oracle still matches). Cross-checked vs an independent eval:
