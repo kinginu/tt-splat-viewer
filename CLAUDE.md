@@ -208,9 +208,12 @@ side-by-side with a divider.
 - **Camera**: `Orbit` is quaternion-based (`orientation: Quat`), so drag-rotation is **unlimited** in
   every direction (yaw about world-up, pitch about the current right axis; no pole clamp). `set_angles`
   reconstructs it from yaw/pitch for the offscreen `--orbit`/`--dual` renders.
-- **XYZ gizmo** (`Axes`, `axes.wgsl`): X=red, Y=green, Z=blue thin quads at the scene center, endpoints
-  CPU-projected via `Camera::project_ndc` and drawn over each pane (synced). `offscreen --dual out.png
-  [yaw pitch]` renders the gizmo too.
+- **XYZ gizmo is external** (in the page, not in the panes): `view_basis()` exports the camera basis
+  (9 floats, column-major = world X/Y/Z in camera space), and `web/index.html` draws a small 2D
+  orientation gizmo that tracks the shared camera. (An earlier in-pane wgpu gizmo was removed per
+  user preference.)
+- `web/index.html` has `Cache-Control: no-store` to avoid stale-wasm confusion after a redeploy; still
+  re-commit `web/*.wasm,*.js` after code changes.
 - **SH (deg-3) color** for the 3DGS pane: `scene::parse_ply` reads `f_rest_*` (channel-major) into
   `Gaussian.sh`; `preprocess(..., eval_sh=true)` evaluates `eval_sh_color` at the view dir (WSR passes
   `false` → DC only, so the tt-splat oracle still matches). Cross-checked vs an independent eval:

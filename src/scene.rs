@@ -56,16 +56,6 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// Project a world point to clip-space NDC `[-1,1]²` (same projection as the gaussians), plus its
-    /// camera-space depth. Straight 3D lines stay straight under this, so it's exact for axis lines.
-    pub fn project_ndc(&self, p: Vec3) -> ([f32; 2], f32) {
-        let pc = self.r_v * p + self.t_v;
-        let z = pc.z.max(1e-4);
-        let px = self.fx * pc.x / z + self.cx;
-        let py = self.fy * pc.y / z + self.cy;
-        ([2.0 * px / self.width as f32 - 1.0, 1.0 - 2.0 * py / self.height as f32], pc.z)
-    }
-
     /// Build directly from a world→cam rotation `r_v` (row-major 9) + translation `t_v`.
     pub fn from_rt(r_v: [f32; 9], t_v: [f32; 3], fx: f32, fy: f32, cx: f32, cy: f32, width: u32, height: u32) -> Self {
         // r_v is row-major; glam Mat3::from_cols wants columns.

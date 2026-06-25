@@ -3,13 +3,17 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
   <title>tt-splat-viewer</title>
   <style>
     html, body { margin: 0; background: #0b0b12; color: #cfd2dc;
       font: 14px/1.5 -apple-system, system-ui, sans-serif; }
-    .wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+    .wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px; }
     canvas { border: 1px solid #2a2c3a; border-radius: 6px; touch-action: none; }
     .hint { opacity: 0.7; }
+    .giz { display: flex; align-items: center; gap: 8px; }
+    .giz canvas { border: none; background: #14141f; border-radius: 8px; }
+    .giz .lbl { opacity: 0.6; font-size: 12px; }
     code { background: #1a1c28; padding: 1px 5px; border-radius: 4px; }
     #err { color: #ff8080; white-space: pre-wrap; max-width: 960px; }
   </style>
@@ -17,9 +21,13 @@
 <body>
   <div class="wrap">
     <h3>tt-splat-viewer <span class="hint">— left: WSR (new method) · right: 3DGS (original) · WebGPU</span></h3>
-    <p class="hint">Drag to orbit (synced) · scroll to zoom · <b>drop a .ply onto either pane</b> ·
+    <p class="hint">Drag to orbit (unlimited, synced) · scroll to zoom · <b>drop a .ply onto either pane</b> ·
       press <b>b</b> to cycle the background (black / <b>white</b> = tt-splat training bg / slate).
       Needs a WebGPU browser (Chrome/Edge, or Safari 17.4+).</p>
+    <div class="giz">
+      <canvas id="gizmo" width="96" height="96"></canvas>
+      <span class="lbl">orientation — X red · Y green · Z blue (tracks the panes)</span>
+    </div>
     <div id="err"></div>
   </div>
   <script type="module">
@@ -49,7 +57,7 @@
     window.addEventListener('error', (e) => show('[window.error] ', [e.message || e]));
     window.addEventListener('unhandledrejection', (e) => show('[rejection] ', [e.reason]));
 
-    import('./tt_splat_viewer.js').then(({ default: init, load_ply_into, cycle_background }) => {
+    import('./tt_splat_viewer.js').then(({ default: init, load_ply_into, cycle_background, view_basis }) => {
       errBox.textContent += 'navigator.gpu present: ' + !!navigator.gpu + '\n';
       if (!navigator.gpu) {
         show('', ['No WebGPU (navigator.gpu undefined). Try Chrome/Edge or Safari 17.4+.']);
@@ -64,6 +72,7 @@
         });
 
         // Drag-and-drop a .ply onto a pane: the drop x-position picks left (0) or right (1).
+        // `:not(#gizmo)` so we measure the WebGPU pane canvas, not the orientation gizmo.
         const cancel = (e) => { e.preventDefault(); e.stopPropagation(); };
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach((ev) =>
           document.addEventListener(ev, cancel, false));
@@ -71,7 +80,7 @@
           const file = e.dataTransfer && e.dataTransfer.files[0];
           if (!file) return;
           let pane = 0;
-          const canvas = document.querySelector('canvas');
+          const canvas = document.querySelector('canvas:not(#gizmo)');
           if (canvas) {
             const r = canvas.getBoundingClientRect();
             pane = (e.clientX - r.left) < r.width / 2 ? 0 : 1;
@@ -85,6 +94,36 @@
             show('[drop] ', [err]);
           }
         });
+
+        // External XYZ orientation gizmo: draw the world axes (columns of the camera basis) in 2D,
+        // matching the panes' screen mapping (camera x→right, y→down). Tracks the shared camera.
+        const giz = document.getElementById('gizmo');
+        const g = giz.getContext('2d');
+        const W = giz.width, H = giz.height, cx = W / 2, cy = H / 2, S = W * 0.36;
+        const COLORS = [[235, 70, 70], [70, 210, 90], [90, 130, 255]];
+        const LBL = ['X', 'Y', 'Z'];
+        function drawGizmo() {
+          const b = view_basis(); // 9 floats, column-major: column i = world axis i in camera space
+          g.clearRect(0, 0, W, H);
+          const items = [];
+          for (let i = 0; i < 3; i++) {
+            const dx = b[i * 3], dy = b[i * 3 + 1], dz = b[i * 3 + 2];
+            items.push({ x: cx + dx * S, y: cy + dy * S, dz, c: COLORS[i], l: LBL[i] });
+          }
+          items.sort((p, q) => q.dz - p.dz); // far (into screen) first, near drawn on top
+          for (const it of items) {
+            const a = it.dz > 0 ? 0.4 : 1.0; // dim axes pointing away from the viewer
+            g.strokeStyle = `rgba(${it.c[0]},${it.c[1]},${it.c[2]},${a})`;
+            g.fillStyle = g.strokeStyle;
+            g.lineWidth = it.dz > 0 ? 2 : 3;
+            g.beginPath(); g.moveTo(cx, cy); g.lineTo(it.x, it.y); g.stroke();
+            g.beginPath(); g.arc(it.x, it.y, 2.5, 0, 7); g.fill();
+            g.font = 'bold 11px sans-serif';
+            g.fillText(it.l, it.x + 3, it.y - 3);
+          }
+          requestAnimationFrame(drawGizmo);
+        }
+        requestAnimationFrame(drawGizmo);
       });
     }).catch((e) => show('[init catch] ', [e]));
   </script>
