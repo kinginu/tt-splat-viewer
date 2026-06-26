@@ -66,7 +66,7 @@
         show('', ['No WebGPU (navigator.gpu undefined). Try Chrome/Edge or Safari 17.4+.']);
         return;
       }
-      return init('./tt_splat_viewer_bg.wasm?v=' + V).then(() => {
+      return init({ module_or_path: './tt_splat_viewer_bg.wasm?v=' + V }).then(() => {
         errBox.textContent += 'wasm module initialized · drop a .ply onto a pane · press b for background\n';
 
         // Background cycle (winit canvas key focus is unreliable on web, so drive it from JS).

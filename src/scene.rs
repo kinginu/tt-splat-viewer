@@ -356,27 +356,50 @@ pub fn parse_ply(bytes: &[u8]) -> std::io::Result<Vec<Gaussian>> {
     let data_start = header_end + marker.len();
     let header = String::from_utf8_lossy(&bytes[..header_end]);
 
-    let mut is_ascii = false;
-    let mut count = 0usize;
-    // (name, byte size) in file order, for the `vertex` element.
-    let mut props: Vec<(String, usize)> = Vec::new();
-    let type_size = |t: &str| -> usize {
-        match t {
+    let type_size = |t: &str| -> Option<usize> {
+        Some(match t {
             "char" | "uchar" | "int8" | "uint8" => 1,
-            "short" | "ushort" | "int16" | "uint16" => 2,
+            "short" | "ushort" | "int16" | "uint16" | "half" | "float16" => 2,
             "int" | "uint" | "int32" | "uint32" | "float" | "float32" => 4,
             "double" | "float64" => 8,
-            _ => 4,
-        }
+            _ => return None,
+        })
     };
+
+    let mut is_ascii = false;
+    let mut is_be = false;
+    let mut count = 0usize;
+    // (name, byte size) for the `vertex` element only (scoped — other elements must not inflate stride).
+    let mut props: Vec<(String, usize)> = Vec::new();
+    let mut cur = String::new();
+    let mut unknown: Vec<String> = Vec::new();
     for line in header.lines() {
         let tok: Vec<&str> = line.split_whitespace().collect();
         match tok.as_slice() {
-            ["format", fmt, ..] => is_ascii = fmt.starts_with("ascii"),
-            ["element", "vertex", n] => count = n.parse().unwrap_or(0),
-            ["property", ty, name] => props.push((name.to_string(), type_size(ty))),
+            ["format", fmt, ..] => {
+                is_ascii = fmt.starts_with("ascii");
+                is_be = fmt.starts_with("binary_big");
+            }
+            ["element", name, n] => {
+                cur = name.to_string();
+                if *name == "vertex" {
+                    count = n.parse().unwrap_or(0);
+                }
+            }
+            ["property", ty, name] if cur == "vertex" => {
+                let sz = type_size(ty).unwrap_or_else(|| {
+                    if !unknown.iter().any(|u| u == ty) {
+                        unknown.push(ty.to_string());
+                    }
+                    4
+                });
+                props.push((name.to_string(), sz));
+            }
             _ => {}
         }
+    }
+    if is_be {
+        return Err(Error::new(ErrorKind::InvalidData, "binary_big_endian .ply not supported"));
     }
 
     let idx = |name: &str| props.iter().position(|(n, _)| n == name);
@@ -448,6 +471,25 @@ pub fn parse_ply(bytes: &[u8]) -> std::io::Result<Vec<Gaussian>> {
             out.push(g_at(&vals, sh));
         }
     } else {
+        // Up-front size check with a precise, actionable message (vs. a per-vertex one mid-loop).
+        let need = data_start + count.saturating_mul(stride);
+        if need > bytes.len() {
+            let extra = if unknown.is_empty() {
+                String::new()
+            } else {
+                format!(" — unrecognized property types {unknown:?} were sized as 4 bytes, which likely \
+                         made the stride wrong (compressed/half-float .ply?)")
+            };
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                format!(
+                    "ply body truncated: expected {need} bytes ({count} verts × {stride}-byte record \
+                     + {data_start} header, {} properties) but the file is {} bytes{extra}",
+                    props.len(),
+                    bytes.len()
+                ),
+            ));
+        }
         for i in 0..count {
             let base = data_start + i * stride;
             if base + stride > bytes.len() {
