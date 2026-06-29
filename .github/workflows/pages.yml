@@ -49,9 +49,7 @@ jobs:
             --out-dir dist --target web --no-typescript
           cp web/index.html web/sample.ply dist/
 
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true # auto-enable Pages (build_type=workflow) once the repo is public
+      - uses: actions/configure-pages@v5 # requires Pages → Source = "GitHub Actions" set once in Settings
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
