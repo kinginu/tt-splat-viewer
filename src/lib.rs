@@ -677,12 +677,14 @@ impl Pane {
     }
 }
 
-/// `split` uniform for the blit (left pane width in pixels; 16-byte aligned).
+/// `split` uniform for the blit (pane widths + height, in **surface** pixels; 16-byte aligned).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SplitRaw {
     left_w: u32,
-    _pad: [u32; 3],
+    right_w: u32,
+    height: u32,
+    _pad: u32,
 }
 
 fn make_blit_bg(
@@ -690,6 +692,7 @@ fn make_blit_bg(
     layout: &wgpu::BindGroupLayout,
     a: &wgpu::TextureView,
     b: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
     split: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -698,7 +701,8 @@ fn make_blit_bg(
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(a) },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(b) },
-            wgpu::BindGroupEntry { binding: 2, resource: split.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 3, resource: split.as_entire_binding() },
         ],
     })
 }
@@ -718,10 +722,13 @@ struct State {
     blit_pipeline: wgpu::RenderPipeline,
     blit_bgl: wgpu::BindGroupLayout,
     blit_bind_group: wgpu::BindGroup,
+    blit_sampler: wgpu::Sampler,
     split_buf: wgpu::Buffer,
 
     orbit: scene::Orbit,
     bg_preset: usize,
+    lowres: bool,    // render panes at half resolution while interacting (fill-rate relief)
+    interact: u32,   // frames of low-res remaining after the last orbit/zoom
     dragging: bool,
     last_cursor: Option<(f64, f64)>,
 }
@@ -802,7 +809,7 @@ impl State {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             },
@@ -816,6 +823,12 @@ impl State {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -825,9 +838,15 @@ impl State {
                 },
             ],
         });
+        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("blit sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let split_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("split"),
-            contents: bytemuck::bytes_of(&SplitRaw { left_w, _pad: [0; 3] }),
+            contents: bytemuck::bytes_of(&SplitRaw { left_w, right_w, height: h, _pad: 0 }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -859,8 +878,9 @@ impl State {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
-        let blit_bind_group =
-            make_blit_bg(&device, &blit_bgl, &pane_a.color_view, &pane_b.color_view, &split_buf);
+        let blit_bind_group = make_blit_bg(
+            &device, &blit_bgl, &pane_a.color_view, &pane_b.color_view, &blit_sampler, &split_buf,
+        );
 
         State {
             surface,
@@ -874,12 +894,59 @@ impl State {
             blit_pipeline,
             blit_bgl,
             blit_bind_group,
+            blit_sampler,
             split_buf,
             orbit,
             bg_preset: 0,
+            lowres: false,
+            interact: 0,
             dragging: false,
             last_cursor: None,
         }
+    }
+
+    /// Pane render dimensions: surface pane widths × the current resolution scale (half during
+    /// interaction). The blit upsamples these back to the full pane regions. Returns
+    /// `(left_render_w, right_render_w, render_h)`.
+    fn render_dims(&self) -> (u32, u32, u32) {
+        let (lw, rw) = split_widths(self.config.width);
+        let h = self.config.height.max(1);
+        let scale = if self.lowres { 0.5 } else { 1.0 };
+        let s = |v: u32| ((v as f32 * scale) as u32).max(1);
+        (s(lw), s(rw), s(h))
+    }
+
+    /// Cameras for both panes at the current render dimensions.
+    fn cameras(&self) -> (scene::Camera, scene::Camera) {
+        let (lw, rw, h) = self.render_dims();
+        (self.orbit.camera(lw, h), self.orbit.camera(rw, h))
+    }
+
+    /// Rebuild the size-dependent state (pane targets at render dims, blit split at surface dims).
+    fn reconfigure(&mut self) {
+        let (lw, rw, h) = self.render_dims();
+        let (cam_a, cam_b) = self.cameras();
+        self.pane_a.resize(&self.device, &self.queue, &cam_a, lw, h);
+        self.pane_b.resize(&self.device, &self.queue, &cam_b, rw, h);
+        let (sw_l, sw_r) = split_widths(self.config.width);
+        self.queue.write_buffer(
+            &self.split_buf,
+            0,
+            bytemuck::bytes_of(&SplitRaw {
+                left_w: sw_l,
+                right_w: sw_r,
+                height: self.config.height.max(1),
+                _pad: 0,
+            }),
+        );
+        self.blit_bind_group = make_blit_bg(
+            &self.device,
+            &self.blit_bgl,
+            &self.pane_a.color_view,
+            &self.pane_b.color_view,
+            &self.blit_sampler,
+            &self.split_buf,
+        );
     }
 
     fn current_bg(&self) -> Background {
@@ -918,10 +985,7 @@ impl State {
 
     /// Refresh both panes for the current shared camera (WSR: tiny uniform write; 3DGS: CPU re-sort).
     fn refresh_view(&mut self) {
-        let (left_w, right_w) = split_widths(self.config.width);
-        let h = self.config.height.max(1);
-        let cam_a = self.orbit.camera(left_w, h);
-        let cam_b = self.orbit.camera(right_w, h);
+        let (cam_a, cam_b) = self.cameras();
         self.pane_a.update_camera(&self.device, &self.queue, &cam_a);
         self.pane_b.update_camera(&self.device, &self.queue, &cam_b);
         self.publish_basis();
@@ -936,41 +1000,41 @@ impl State {
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
-
-        let (left_w, right_w) = split_widths(new_size.width);
-        let h = new_size.height;
-        let cam_a = self.orbit.camera(left_w, h);
-        let cam_b = self.orbit.camera(right_w, h);
-        self.pane_a.resize(&self.device, &self.queue, &cam_a, left_w, h);
-        self.pane_b.resize(&self.device, &self.queue, &cam_b, right_w, h);
-        self.queue.write_buffer(
-            &self.split_buf,
-            0,
-            bytemuck::bytes_of(&SplitRaw { left_w, _pad: [0; 3] }),
-        );
-        self.blit_bind_group = make_blit_bg(
-            &self.device,
-            &self.blit_bgl,
-            &self.pane_a.color_view,
-            &self.pane_b.color_view,
-            &self.split_buf,
-        );
+        self.reconfigure();
         self.window.request_redraw();
+    }
+
+    /// Mark the next few frames as "interacting" so they render at half resolution.
+    fn begin_interaction(&mut self) {
+        self.interact = 12;
     }
 
     /// Handle a mouse-drag delta (orbit) — unlimited rotation in any direction (no pole clamp).
     fn orbit_drag(&mut self, dx: f64, dy: f64) {
         self.orbit.rotate(dx as f32, dy as f32);
+        self.begin_interaction();
         self.refresh_view();
     }
 
     /// Handle a scroll delta (dolly in/out).
     fn zoom(&mut self, scroll: f32) {
         self.orbit.radius = (self.orbit.radius * (1.0 - scroll * 0.1)).max(1e-2);
+        self.begin_interaction();
         self.refresh_view();
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        // Drop to half resolution while interacting; restore full res a few frames after it stops.
+        let want_lowres = self.interact > 0;
+        if want_lowres != self.lowres {
+            self.lowres = want_lowres;
+            self.reconfigure();
+        }
+        if self.interact > 0 {
+            self.interact -= 1;
+            self.window.request_redraw(); // keep the low-res tail (and the sharpen-up) coming
+        }
+
         let frame = self.surface.get_current_texture()?;
         let view = frame
             .texture

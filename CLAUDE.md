@@ -211,9 +211,13 @@ side-by-side with a divider.
   WSR validated identical to the CPU path (50.39 / 67.10 dB). The **3DGS pane**'s only per-frame CPU
   cost is the depth **sort** (`scene::sorted_raw` — one dot per gaussian + argsort + write the sorted
   buffer); it's GPU-projected and **DC-color only** (the GPU path dropped the CPU SH eval — re-add via
-  a coeff buffer if needed). Remaining bottleneck for large `.ply` is now **fill-rate/overdraw** (next:
-  lower-resolution rendering during interaction). `scene::preprocess`/`InstanceRaw` are now unused by
-  the renderers (kept as the validated CPU reference).
+  a coeff buffer if needed). `scene::preprocess`/`InstanceRaw` are now unused by the renderers (kept
+  as the validated CPU reference).
+- **Perf — dynamic resolution**: during orbit/zoom the panes render at **half resolution** and the
+  blit (`blit.wgsl`, now a linear sampler) upsamples; full res restores ~12 frames after interaction
+  stops. Cuts fill-rate/overdraw (the dominant cost for large `.ply`) ~4× while dragging. `SplitRaw`
+  carries surface pane widths + height for the blit UV mapping; `State::{render_dims,reconfigure}`.
+  (Idle still re-renders full-res continuously — render-on-demand is a later refinement.)
 - **Camera**: `Orbit` is quaternion-based (`orientation: Quat`), so drag-rotation is **unlimited** in
   every direction (yaw about world-up, pitch about the current right axis; no pole clamp). `set_angles`
   reconstructs it from yaw/pitch for the offscreen `--orbit`/`--dual` renders.

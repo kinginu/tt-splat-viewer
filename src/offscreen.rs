@@ -182,7 +182,7 @@ pub async fn render_dual(
         binding: b,
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },
@@ -196,6 +196,12 @@ pub async fn render_dual(
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
                 visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -205,9 +211,10 @@ pub async fn render_dual(
             },
         ],
     });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
     let split_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("split"),
-        contents: bytemuck::bytes_of(&SplitRaw { left_w, _pad: [0; 3] }),
+        contents: bytemuck::bytes_of(&SplitRaw { left_w, right_w, height, _pad: 0 }),
         usage: wgpu::BufferUsages::UNIFORM,
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -239,7 +246,7 @@ pub async fn render_dual(
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
     });
-    let bind = make_blit_bg(&device, &bgl, &pane_a.color_view, &pane_b.color_view, &split_buf);
+    let bind = make_blit_bg(&device, &bgl, &pane_a.color_view, &pane_b.color_view, &sampler, &split_buf);
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dual target"),
