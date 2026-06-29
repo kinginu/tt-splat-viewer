@@ -21,7 +21,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,8 +49,8 @@ jobs:
             --out-dir dist --target web --no-typescript
           cp web/index.html web/sample.ply dist/
 
-      - uses: actions/configure-pages@v5 # requires Pages → Source = "GitHub Actions" set once in Settings
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6 # requires Pages → Source = "GitHub Actions" set once in Settings
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
@@ -62,4 +62,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
