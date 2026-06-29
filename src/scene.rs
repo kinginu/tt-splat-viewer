@@ -144,17 +144,27 @@ pub struct CamUniform {
     pub misc: [f32; 4],     // viewport.x, viewport.y, radius_sigma², blur_eps
 }
 
+fn raw_of(g: &Gaussian) -> GaussianRaw {
+    GaussianRaw {
+        mean_opacity: [g.mean.x, g.mean.y, g.mean.z, g.opacity_raw],
+        log_scale: [g.log_scale.x, g.log_scale.y, g.log_scale.z, 0.0],
+        quat: g.quat,
+        color_dc: [g.color_dc.x, g.color_dc.y, g.color_dc.z, 0.0],
+    }
+}
+
 /// Repack gaussians into GPU-ready raw form (no projection — that happens on the GPU).
 pub fn to_raw(gaussians: &[Gaussian]) -> Vec<GaussianRaw> {
-    gaussians
-        .iter()
-        .map(|g| GaussianRaw {
-            mean_opacity: [g.mean.x, g.mean.y, g.mean.z, g.opacity_raw],
-            log_scale: [g.log_scale.x, g.log_scale.y, g.log_scale.z, 0.0],
-            quat: g.quat,
-            color_dc: [g.color_dc.x, g.color_dc.y, g.color_dc.z, 0.0],
-        })
-        .collect()
+    gaussians.iter().map(raw_of).collect()
+}
+
+/// Like [`to_raw`] but ordered far→near for the 3DGS painter's-order pane. Only the cheap camera-space
+/// depth (`(R_v·mean + t_v).z`) is computed per gaussian — not the full projection (that's on the GPU).
+pub fn sorted_raw(gaussians: &[Gaussian], cam: &Camera) -> Vec<GaussianRaw> {
+    let keys: Vec<f32> = gaussians.iter().map(|g| (cam.r_v * g.mean + cam.t_v).z).collect();
+    let mut idx: Vec<u32> = (0..gaussians.len() as u32).collect();
+    idx.sort_unstable_by(|&a, &b| keys[b as usize].total_cmp(&keys[a as usize])); // descending
+    idx.iter().map(|&i| raw_of(&gaussians[i as usize])).collect()
 }
 
 /// Build the per-frame camera uniform for the GPU-projection shader. `radius_sigma` sets the quad

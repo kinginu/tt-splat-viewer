@@ -26,17 +26,10 @@ use winit::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-use scene::{Background, CamUniform, GaussianRaw, InstanceRaw};
+use scene::{Background, CamUniform, GaussianRaw};
 
 const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// `globals` uniform for the splat pass (16-byte aligned).
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct GlobalsRaw {
-    viewport: [f32; 2],
-    _pad: [f32; 2],
-}
 
 /// `comp` uniform for the composite pass (vec3 + f32 = 16 bytes).
 #[repr(C)]
@@ -416,11 +409,13 @@ enum Method {
     Gs,
 }
 
-/// Standard 3DGS renderer: depth-sorted instances drawn with `exp(−Q/2)` alpha and "over" blending.
+/// Standard 3DGS renderer (GPU-projected). The instance buffer holds raw gaussians in **depth-sorted
+/// order** (CPU sorts the means each camera move); drawing them in order resolves occlusion. The
+/// vertex shader projects, so a camera move only rewrites the small `cam` uniform + the sorted buffer.
 struct GsRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
-    globals_buf: wgpu::Buffer,
+    cam_buf: wgpu::Buffer,
     instance_buf: wgpu::Buffer,
     instance_count: u32,
     clear: wgpu::Color,
@@ -430,25 +425,21 @@ impl GsRenderer {
     fn new(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
-        instances: &[InstanceRaw],
+        gaussians_sorted: &[GaussianRaw],
+        cam: &CamUniform,
         bg: &Background,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gs shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("gs.wgsl").into()),
         });
-        let globals_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("gs globals"),
-            contents: bytemuck::bytes_of(&GlobalsRaw {
-                viewport: [width as f32, height as f32],
-                _pad: [0.0, 0.0],
-            }),
+        let cam_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gs cam"),
+            contents: bytemuck::bytes_of(cam),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("gs globals bgl"),
+            label: Some("gs cam bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
@@ -461,23 +452,23 @@ impl GsRenderer {
             }],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gs globals bg"),
+            label: Some("gs cam bg"),
             layout: &bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: globals_buf.as_entire_binding(),
+                resource: cam_buf.as_entire_binding(),
             }],
         });
         let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("gs instances"),
-            contents: bytemuck::cast_slice(instances),
+            label: Some("gs gaussians"),
+            contents: bytemuck::cast_slice(gaussians_sorted),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let instance_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<GaussianRaw>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &wgpu::vertex_attr_array![
-                0 => Float32x2, 1 => Float32x2, 2 => Float32x3, 3 => Float32, 4 => Float32x3,
+                0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
             ],
         };
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -527,35 +518,35 @@ impl GsRenderer {
         Self {
             pipeline,
             bind_group,
-            globals_buf,
+            cam_buf,
             instance_buf,
-            instance_count: instances.len() as u32,
+            instance_count: gaussians_sorted.len() as u32,
             clear: bg_clear(bg),
         }
     }
 
-    fn update_instances(&mut self, device: &wgpu::Device, instances: &[InstanceRaw]) {
+    /// Per-frame: rewrite the camera uniform.
+    fn update_camera(&self, queue: &wgpu::Queue, cam: &CamUniform) {
+        queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(cam));
+    }
+
+    /// Re-upload the depth-sorted gaussians into the existing buffer (same count) — used on re-sort.
+    fn update_sorted(&self, queue: &wgpu::Queue, gaussians_sorted: &[GaussianRaw]) {
+        queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(gaussians_sorted));
+    }
+
+    /// Replace the gaussian set (scene change) — reallocates the buffer for the new count.
+    fn set_gaussians(&mut self, device: &wgpu::Device, gaussians_sorted: &[GaussianRaw]) {
         self.instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("gs instances"),
-            contents: bytemuck::cast_slice(instances),
+            label: Some("gs gaussians"),
+            contents: bytemuck::cast_slice(gaussians_sorted),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
-        self.instance_count = instances.len() as u32;
+        self.instance_count = gaussians_sorted.len() as u32;
     }
 
     fn update_background(&mut self, bg: &Background) {
         self.clear = bg_clear(bg);
-    }
-
-    fn resize(&self, queue: &wgpu::Queue, width: u32, height: u32) {
-        queue.write_buffer(
-            &self.globals_buf,
-            0,
-            bytemuck::bytes_of(&GlobalsRaw {
-                viewport: [width as f32, height as f32],
-                _pad: [0.0, 0.0],
-            }),
-        );
     }
 
     fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
@@ -615,34 +606,39 @@ impl Pane {
                 let cam_u = scene::cam_uniform(cam, scene::WSR_SIGMAS);
                 (Some(Renderer::new(device, PANE_FORMAT, width, height, &raw, &cam_u, bg)), None)
             }
-            // 3DGS: still CPU-projected + depth-sorted per frame (GPU path is a later step).
+            // 3DGS: GPU-projected too; only the depth-sorted order is computed on the CPU per frame.
             Method::Gs => {
-                let inst = scene::preprocess_sorted(&gaussians, cam, scene::GS_SIGMAS, true);
-                (None, Some(GsRenderer::new(device, PANE_FORMAT, width, height, &inst, bg)))
+                let raw = scene::sorted_raw(&gaussians, cam);
+                let cam_u = scene::cam_uniform(cam, scene::GS_SIGMAS);
+                (None, Some(GsRenderer::new(device, PANE_FORMAT, &raw, &cam_u, bg)))
             }
         };
         Pane { gaussians, color_view, wsr, gs }
     }
 
-    /// Refresh for a new camera. WSR just rewrites the GPU camera uniform (no per-gaussian work);
-    /// 3DGS still re-runs the CPU preprocess + depth sort.
-    fn update_camera(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, cam: &scene::Camera) {
-        match (&self.wsr, &mut self.gs) {
+    /// Refresh for a new camera. Both panes just rewrite the GPU camera uniform; the 3DGS pane also
+    /// re-sorts its means on the CPU (cheap — one dot per gaussian) and re-uploads the sorted order.
+    fn update_camera(&mut self, _device: &wgpu::Device, queue: &wgpu::Queue, cam: &scene::Camera) {
+        match (&self.wsr, &self.gs) {
             (Some(r), _) => r.update_camera(queue, &scene::cam_uniform(cam, scene::WSR_SIGMAS)),
             (_, Some(r)) => {
-                let inst = scene::preprocess_sorted(&self.gaussians, cam, scene::GS_SIGMAS, true);
-                r.update_instances(device, &inst);
+                r.update_camera(queue, &scene::cam_uniform(cam, scene::GS_SIGMAS));
+                r.update_sorted(queue, &scene::sorted_raw(&self.gaussians, cam));
             }
             _ => {}
         }
     }
 
-    /// Replace this pane's gaussians (background applied separately, camera refresh follows). WSR
-    /// re-uploads the raw gaussians once here; 3DGS re-uploads in `update_camera`.
+    /// Replace this pane's gaussians (background applied separately, camera refresh follows). Re-uploads
+    /// the raw gaussians; the 3DGS pane gets sorted on the next `update_camera`.
     fn set_scene(&mut self, device: &wgpu::Device, gaussians: Vec<scene::Gaussian>) {
         self.gaussians = gaussians;
+        let raw = scene::to_raw(&self.gaussians);
         if let Some(r) = &mut self.wsr {
-            r.set_gaussians(device, &scene::to_raw(&self.gaussians));
+            r.set_gaussians(device, &raw);
+        }
+        if let Some(r) = &mut self.gs {
+            r.set_gaussians(device, &raw);
         }
     }
 
@@ -664,10 +660,10 @@ impl Pane {
         height: u32,
     ) {
         self.color_view = make_color_target(device, width, height);
-        match (&mut self.wsr, &self.gs) {
-            (Some(r), _) => r.resize(device, width, height),
-            (_, Some(r)) => r.resize(queue, width, height),
-            _ => {}
+        // WSR recreates its size-dependent accumulator; the 3DGS pane has no size-dependent state
+        // (viewport rides in the camera uniform, refreshed by update_camera below).
+        if let Some(r) = &mut self.wsr {
+            r.resize(device, width, height);
         }
         self.update_camera(device, queue, cam);
     }

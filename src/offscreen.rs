@@ -55,8 +55,9 @@ pub async fn render(cam: &Camera, gaussians: &[Gaussian], bg: &Background, gs: b
         Renderer::new(&device, TARGET_FORMAT, width, height, &raw, &cam_u, bg)
     });
     let gsr = gs.then(|| {
-        let inst = scene::preprocess_sorted(gaussians, cam, scene::GS_SIGMAS, true);
-        GsRenderer::new(&device, TARGET_FORMAT, width, height, &inst, bg)
+        let raw = scene::sorted_raw(gaussians, cam);
+        let cam_u = scene::cam_uniform(cam, scene::GS_SIGMAS);
+        GsRenderer::new(&device, TARGET_FORMAT, &raw, &cam_u, bg)
     });
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
