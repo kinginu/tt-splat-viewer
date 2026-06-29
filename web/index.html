@@ -6,13 +6,18 @@
   <meta http-equiv="Cache-Control" content="no-store" />
   <title>tt-splat-viewer</title>
   <style>
-    html, body { margin: 0; background: #0b0b12; color: #cfd2dc;
+    html, body { margin: 0; height: 100%; background: #0b0b12; color: #cfd2dc;
       font: 14px/1.5 -apple-system, system-ui, sans-serif; }
-    .wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px; }
-    canvas { border: 1px solid #2a2c3a; border-radius: 6px; touch-action: none; }
-    .hint { opacity: 0.7; }
+    /* column layout: a compact header, then the render canvas fills the rest of the viewport */
+    body { display: flex; flex-direction: column; }
+    .wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 16px; }
+    .hint { opacity: 0.7; margin: 2px 0; text-align: center; }
+    h3 { margin: 4px 0; }
+    /* the winit canvas (no id) fills the remaining space and is sized responsively */
+    canvas:not(#gizmo) { flex: 1 1 auto; width: 100%; min-height: 0; display: block;
+      touch-action: none; }
     .giz { display: flex; align-items: center; gap: 8px; }
-    .giz canvas { border: none; background: #14141f; border-radius: 8px; }
+    .giz canvas { background: #14141f; border-radius: 8px; }
     .giz .lbl { opacity: 0.6; font-size: 12px; }
     code { background: #1a1c28; padding: 1px 5px; border-radius: 4px; }
     #err { color: #ff8080; white-space: pre-wrap; max-width: 960px; }
@@ -60,7 +65,7 @@
     // Cache-bust both the JS module and the wasm so a redeploy is never served stale (no-store only
     // covers the HTML; the module loader caches the .js/.wasm separately).
     const V = Date.now();
-    import('./tt_splat_viewer.js?v=' + V).then(({ default: init, load_ply_into, cycle_background, view_basis }) => {
+    import('./tt_splat_viewer.js?v=' + V).then(({ default: init, load_ply_into, cycle_background, view_basis, set_canvas_size }) => {
       errBox.textContent += 'navigator.gpu present: ' + !!navigator.gpu + '\n';
       if (!navigator.gpu) {
         show('', ['No WebGPU (navigator.gpu undefined). Try Chrome/Edge or Safari 17.4+.']);
@@ -68,6 +73,25 @@
       }
       return init({ module_or_path: './tt_splat_viewer_bg.wasm?v=' + V }).then(() => {
         errBox.textContent += 'wasm module initialized · drop a .ply onto a pane · press b for background\n';
+
+        // Responsive canvas: match the render backing size to the laid-out canvas × devicePixelRatio
+        // (capped at 2 to keep fill-rate sane). winit appends the canvas async, so wait for it.
+        const mainCanvas = () => document.querySelector('canvas:not(#gizmo)');
+        const fit = () => {
+          const c = mainCanvas();
+          if (!c) return;
+          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          set_canvas_size(Math.max(1, Math.round(c.clientWidth * dpr)),
+                          Math.max(1, Math.round(c.clientHeight * dpr)));
+        };
+        const startResize = () => {
+          const c = mainCanvas();
+          if (!c) { requestAnimationFrame(startResize); return; }
+          new ResizeObserver(fit).observe(c);
+          window.addEventListener('resize', fit);
+          fit();
+        };
+        startResize();
 
         // Background cycle (winit canvas key focus is unreliable on web, so drive it from JS).
         document.addEventListener('keydown', (e) => {

@@ -1097,10 +1097,19 @@ thread_local! {
     static PENDING_SCENE: std::cell::RefCell<Option<(usize, Vec<scene::Gaussian>)>> =
         const { std::cell::RefCell::new(None) };
     static PENDING_BG_CYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Pending canvas backing size (physical px) from the JS resize observer.
+    static PENDING_RESIZE: std::cell::Cell<Option<(u32, u32)>> = const { std::cell::Cell::new(None) };
     // Current view rotation (camera basis, column-major): each column is a world axis in camera space.
     // The JS page reads this to draw the external XYZ orientation gizmo.
     static VIEW_BASIS: std::cell::Cell<[f32; 9]> =
         const { std::cell::Cell::new([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]) };
+}
+
+/// Called from JS (resize/ResizeObserver) with the desired canvas backing size in physical pixels.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_canvas_size(width: u32, height: u32) {
+    PENDING_RESIZE.with(|p| p.set(Some((width.max(1), height.max(1)))));
 }
 
 /// The view rotation as 9 floats (column-major): columns are the world X/Y/Z axes in camera space
@@ -1173,6 +1182,11 @@ pub async fn run() {
                 }
                 if PENDING_BG_CYCLE.with(|c| c.replace(false)) {
                     state.cycle_background();
+                }
+                if let Some((w, h)) = PENDING_RESIZE.with(|p| p.take()) {
+                    if (w, h) != (state.config.width, state.config.height) {
+                        state.resize(winit::dpi::PhysicalSize::new(w, h));
+                    }
                 }
             }
             state.window.request_redraw();
@@ -1286,7 +1300,9 @@ fn init_logging() {
     }
 }
 
-/// On the web, winit creates a detached canvas — size it and append it to the page so it is visible.
+/// On the web, winit creates a detached canvas — append it to the page so it is visible. CSS controls
+/// the *display* size (responsive); the JS resize observer drives the *backing* size via
+/// `set_canvas_size`, so the render resolution follows the browser window.
 #[cfg(target_arch = "wasm32")]
 fn attach_canvas(window: &Window) {
     use winit::platform::web::WindowExtWebSys;
@@ -1295,6 +1311,7 @@ fn attach_canvas(window: &Window) {
         .and_then(|doc| {
             let body = doc.body()?;
             let canvas = window.canvas()?; // web_sys::HtmlCanvasElement
+            // Initial backing size; the JS resize observer corrects it to the laid-out size at once.
             canvas.set_width(1280);
             canvas.set_height(720);
             body.append_child(&canvas).ok()?;

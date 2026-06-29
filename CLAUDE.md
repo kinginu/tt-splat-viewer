@@ -170,6 +170,10 @@ python3 -m http.server 8080 --bind 127.0.0.1 --directory web      # then open ht
 - Uses the **WebGPU** backend (Cargo wasm deps drop the `webgl` feature) because the WSR accumulator
   is `Rgba16Float` with additive blending, which WebGL2 can't reliably render+blend. Needs Chrome/Edge
   or Safari 17.4+.
+- **Responsive canvas**: CSS sizes the canvas display (fills the viewport below the header); a JS
+  `ResizeObserver` sets the render backing via the `set_canvas_size(w,h)` wasm export (display ×
+  devicePixelRatio, dpr capped at 2), applied as `State::resize`. So the render follows the window
+  size (no longer fixed 1280×720). Native uses winit's own `Resized`.
 - `web/index.html` (tracked) contains a **compat shim** that strips the `maxInterStageShaderComponents`
   limit from `GPUAdapter.requestDevice` — wgpu 0.20 still sends it but current Chrome removed it from
   the spec and rejects the call. Real fix later: bump wgpu. The shim also mirrors console errors onto
