@@ -205,6 +205,11 @@ side-by-side with a divider.
   (two `Pane`s + blit, like the window) so the dual view is verifiable on the headless box without a
   browser. WSR PSNR vs oracle unchanged (50.39 dB) after the refactor.
 - Default sample (no `.ply`): `scene::synthetic_scene()` — the 3 single-color gaussians, in both panes.
+- **Perf — WSR is GPU-projected** (`scene::GaussianRaw`/`CamUniform`, `shader.wgsl::project`): raw
+  gaussians upload **once**; a camera move only rewrites a 96-byte `cam` uniform and the **vertex
+  shader does the EWA projection** (no per-frame CPU work, no instance re-upload). Validated identical
+  to the CPU path (50.39 / 67.10 dB). The **3DGS pane is still CPU-projected + depth-sorted per frame**
+  (the depth sort is the blocker; GPU-izing it is the next perf step — upload-once + sorted index buffer).
 - **Camera**: `Orbit` is quaternion-based (`orientation: Quat`), so drag-rotation is **unlimited** in
   every direction (yaw about world-up, pitch about the current right axis; no pole clamp). `set_angles`
   reconstructs it from yaw/pitch for the offscreen `--orbit`/`--dual` renders.

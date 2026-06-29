@@ -121,6 +121,56 @@ pub const WSR_SIGMAS: f32 = 2.0; // sqrt(K) with K = 4
 /// Footprint radius for the 3DGS `exp(−Q/2)` quad — 3σ captures the exponential tail.
 pub const GS_SIGMAS: f32 = 3.0;
 
+/// Raw per-gaussian data uploaded to the GPU **once** (not per frame) — the vertex shader does the
+/// EWA projection itself. Four `vec4`s (64 B, 16-byte aligned) so it works as instance attributes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GaussianRaw {
+    pub mean_opacity: [f32; 4],  // mean.xyz, opacity_raw
+    pub log_scale: [f32; 4],     // log_scale.xyz, _
+    pub quat: [f32; 4],          // w, x, y, z
+    pub color_dc: [f32; 4],      // color_dc.xyz, _
+}
+
+/// Per-frame camera uniform consumed by the GPU-projection vertex shader (96 B, six `vec4`s).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct CamUniform {
+    pub r_v0: [f32; 4], // columns of R_v (world→cam rotation); .xyz used
+    pub r_v1: [f32; 4],
+    pub r_v2: [f32; 4],
+    pub t_v_near: [f32; 4], // t_v.xyz, near
+    pub intr: [f32; 4],     // fx, fy, cx, cy
+    pub misc: [f32; 4],     // viewport.x, viewport.y, radius_sigma², blur_eps
+}
+
+/// Repack gaussians into GPU-ready raw form (no projection — that happens on the GPU).
+pub fn to_raw(gaussians: &[Gaussian]) -> Vec<GaussianRaw> {
+    gaussians
+        .iter()
+        .map(|g| GaussianRaw {
+            mean_opacity: [g.mean.x, g.mean.y, g.mean.z, g.opacity_raw],
+            log_scale: [g.log_scale.x, g.log_scale.y, g.log_scale.z, 0.0],
+            quat: g.quat,
+            color_dc: [g.color_dc.x, g.color_dc.y, g.color_dc.z, 0.0],
+        })
+        .collect()
+}
+
+/// Build the per-frame camera uniform for the GPU-projection shader. `radius_sigma` sets the quad
+/// footprint ([`WSR_SIGMAS`] / [`GS_SIGMAS`]); the shader uses `radius_sigma²·Σ_ii` for the half-extent.
+pub fn cam_uniform(cam: &Camera, radius_sigma: f32) -> CamUniform {
+    let c = cam.r_v.to_cols_array(); // column-major: [c0, c1, c2]
+    CamUniform {
+        r_v0: [c[0], c[1], c[2], 0.0],
+        r_v1: [c[3], c[4], c[5], 0.0],
+        r_v2: [c[6], c[7], c[8], 0.0],
+        t_v_near: [cam.t_v.x, cam.t_v.y, cam.t_v.z, NEAR],
+        intr: [cam.fx, cam.fy, cam.cx, cam.cy],
+        misc: [cam.width as f32, cam.height as f32, radius_sigma * radius_sigma, BLUR_EPS],
+    }
+}
+
 /// `quat_to_rotmat` (`[w,x,y,z]`, normalized). Mirrors `geometry.quat_to_rotmat`.
 fn quat_to_rotmat(q: [f32; 4]) -> Mat3 {
     let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt().max(1e-12);

@@ -7,8 +7,8 @@
 use wgpu::util::DeviceExt;
 
 use crate::{
-    make_blit_bg, scene::Background, scene::Camera, scene::Gaussian, scene::InstanceRaw,
-    split_widths, GsRenderer, Method, Pane, Renderer, SplitRaw,
+    make_blit_bg, scene, scene::Background, scene::Camera, scene::Gaussian, split_widths, GsRenderer,
+    Method, Pane, Renderer, SplitRaw,
 };
 
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -17,9 +17,9 @@ fn align_up(value: u32, align: u32) -> u32 {
     ((value + align - 1) / align) * align
 }
 
-/// Render `instances` (already preprocessed for `cam`) headlessly. Returns `(width, height, rgba8)`.
-/// `gs = true` uses the standard-3DGS renderer (instances must be depth-sorted), else WSR.
-pub async fn render(cam: &Camera, instances: &[InstanceRaw], bg: &Background, gs: bool) -> (u32, u32, Vec<u8>) {
+/// Render `gaussians` for `cam` headlessly. Returns `(width, height, rgba8)`. `gs = true` uses the
+/// standard-3DGS renderer (CPU-projected + depth-sorted), else WSR (GPU-projected in the vertex shader).
+pub async fn render(cam: &Camera, gaussians: &[Gaussian], bg: &Background, gs: bool) -> (u32, u32, Vec<u8>) {
     let (width, height) = (cam.width, cam.height);
 
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -47,9 +47,17 @@ pub async fn render(cam: &Camera, instances: &[InstanceRaw], bg: &Background, gs
         .await
         .expect("request device (offscreen)");
 
-    // One of the two renderers (boxed as a closure to keep the readback path shared).
-    let wsr = (!gs).then(|| Renderer::new(&device, TARGET_FORMAT, width, height, instances, bg));
-    let gsr = gs.then(|| GsRenderer::new(&device, TARGET_FORMAT, width, height, instances, bg));
+    // One of the two renderers. WSR uploads raw gaussians + a camera uniform (GPU projection);
+    // 3DGS uploads CPU-preprocessed, depth-sorted instances.
+    let wsr = (!gs).then(|| {
+        let raw = scene::to_raw(gaussians);
+        let cam_u = scene::cam_uniform(cam, scene::WSR_SIGMAS);
+        Renderer::new(&device, TARGET_FORMAT, width, height, &raw, &cam_u, bg)
+    });
+    let gsr = gs.then(|| {
+        let inst = scene::preprocess_sorted(gaussians, cam, scene::GS_SIGMAS, true);
+        GsRenderer::new(&device, TARGET_FORMAT, width, height, &inst, bg)
+    });
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen target"),

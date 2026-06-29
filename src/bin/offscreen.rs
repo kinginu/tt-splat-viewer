@@ -67,21 +67,15 @@ fn main() {
         scene::load_scene_json(Path::new(&input)).expect("load scene.json")
     };
 
-    let instances = if gs {
-        scene::preprocess_sorted(&gaussians, &cam, scene::GS_SIGMAS, true)
-    } else {
-        scene::preprocess(&gaussians, &cam, scene::WSR_SIGMAS, false)
-    };
     eprintln!(
-        "rendering {} gaussians ({} kept) at {}x{} [{}]",
+        "rendering {} gaussians at {}x{} [{}]",
         gaussians.len(),
-        instances.len(),
         cam.width,
         cam.height,
-        if gs { "3DGS" } else { "WSR" }
+        if gs { "3DGS" } else { "WSR (GPU-projected)" }
     );
 
-    let (w, h, rgba) = pollster::block_on(offscreen::render(&cam, &instances, &bg, gs));
+    let (w, h, rgba) = pollster::block_on(offscreen::render(&cam, &gaussians, &bg, gs));
     image::RgbaImage::from_raw(w, h, rgba)
         .expect("build image")
         .save(&out_path)
