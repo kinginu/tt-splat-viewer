@@ -179,6 +179,10 @@ python3 -m http.server 8080 --bind 127.0.0.1 --directory web      # then open ht
   the spec and rejects the call. Real fix later: bump wgpu. The shim also mirrors console errors onto
   the page (handy when the only feedback is a screenshot).
 - `web/*.wasm` and `web/*.js` are generated (gitignored); regenerate with the two commands above.
+- **Public deploy = GitHub Pages via CI** (`.github/workflows/pages.yml`): on push to `main` it builds
+  the wasm, runs wasm-bindgen (CLI version read from the tracked `Cargo.lock`), assembles
+  `index.html`+`sample.ply`+wasm/js, and deploys → `https://kinginu.github.io/tt-splat-viewer/`. The
+  wasm/js are **not committed** (CI builds them). One-time repo setting: Pages → Source = GitHub Actions.
 - On this headless dev box, serving over Tailscale works: `sudo tailscale serve --bg 8080` →
   `https://<host>.<tailnet>.ts.net/` (HTTPS satisfies WebGPU's secure-context requirement).
 - The default scene (no `.ply` arg, and always on WASM) is `scene::demo_scene()` — a procedural
@@ -232,8 +236,8 @@ side-by-side with a divider.
   (9 floats, column-major = world X/Y/Z in camera space), and `web/index.html` draws a small 2D
   orientation gizmo that tracks the shared camera. (An earlier in-pane wgpu gizmo was removed per
   user preference.)
-- `web/index.html` has `Cache-Control: no-store` to avoid stale-wasm confusion after a redeploy; still
-  re-commit `web/*.wasm,*.js` after code changes.
+- `web/index.html` has `Cache-Control: no-store` + a `?v=Date.now()` query on the JS/wasm imports to
+  avoid stale-bundle confusion after a redeploy (the wasm/js are CI-built, not committed).
 - **SH (deg-3) color** for the 3DGS pane: `scene::parse_ply` reads `f_rest_*` (channel-major) into
   `Gaussian.sh`; `preprocess(..., eval_sh=true)` evaluates `eval_sh_color` at the view dir (WSR passes
   `false` → DC only, so the tt-splat oracle still matches). Cross-checked vs an independent eval:

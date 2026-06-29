@@ -13,6 +13,19 @@ Native (desktop) + WASM (browser).
 > Blackhole silicon, which this viewer does not touch. No perf claims come from here. Its job is to
 > *see* the tt-splat model on real scenes and de-risk its known weaknesses (depth-free occlusion; scale).
 
+## Live demo (no install)
+
+**→ https://kinginu.github.io/tt-splat-viewer/** — open in a WebGPU browser (Chrome/Edge, or
+Safari 17.4+) and **drop a `.ply` onto a pane**. Left = WSR (the faithful render), right = standard
+3DGS (for comparison). Left-drag orbits, right-drag pans, scroll zooms, `b` cycles the background.
+
+**Why a dedicated viewer:** tt-splat exports its trained model as a standard-layout `.ply`, but those
+gaussians are **fit to the WSR renderer** (poly-splat `(1−Q/k)₊²` + Weighted Sum Rendering — no `exp`,
+no depth sort). A standard 3DGS viewer renders with `exp`-splat + sorted alpha and will **not**
+reproduce the image. This viewer renders WSR faithfully (and shows standard 3DGS side-by-side).
+Route-B models also train against a **white** background (`b` → white) since the `.ply` carries no
+background term.
+
 ## Usage
 
 ```sh
@@ -22,23 +35,14 @@ cargo run --release -- path/to/model.ply      # omit the arg for a built-in synt
 # Headless render to a PNG (no display needed):
 cargo run --bin offscreen -- model.ply out.png --orbit 45 20   # auto-framed, yaw/pitch in degrees
 
-# Browser (WebGPU) — no native display needed; see CLAUDE.md for the wasm-bindgen + serve steps.
+# Browser (WebGPU): build the wasm bundle locally, then static-serve web/.
+cargo build --lib --target wasm32-unknown-unknown --release
+wasm-bindgen target/wasm32-unknown-unknown/release/tt_splat_viewer.wasm --out-dir web --target web --no-typescript
+cd web && python3 -m http.server 8000   # open http://localhost:8000 (localhost is a WebGPU secure context)
 ```
 
-### Run it in a browser with no Rust toolchain
-
-The prebuilt WebGPU bundle is committed under `web/` (wasm + js), so any machine can host it with just
-a static server — no Rust, no build step:
-
-```sh
-git pull
-cd web && python3 -m http.server 8000     # python3 ships with macOS
-# open http://localhost:8000 in Chrome/Edge (or Safari 17.4+)
-```
-
-`localhost` is a WebGPU secure context, so no HTTPS is needed. The wasm is `wasm32` (CPU-arch neutral),
-so the bundle built on x86 Linux runs as-is on an Apple-Silicon Mac. With no `.ply` the viewer shows the
-built-in sample (3 gaussians); drag a `.ply` (e.g. the bundled `web/sample.ply`) onto a pane to load it.
+The public live demo above is built and deployed to GitHub Pages by CI
+(`.github/workflows/pages.yml`) on every push to `main` — the wasm/js are generated, not committed.
 
 A standard INRIA-3DGS `.ply` is rendered through the WSR model directly — see CLAUDE.md §4 on what
 that does and does not show.

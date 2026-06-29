@@ -1,0 +1,65 @@
+name: Deploy viewer to GitHub Pages
+
+# Builds the WASM/WebGPU viewer and publishes web/ to GitHub Pages on every push to main.
+# Repo setting required once: Settings → Pages → Source = "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Match the wasm-bindgen CLI to the wasm-bindgen crate pinned in Cargo.lock.
+      - name: Resolve wasm-bindgen version
+        id: wb
+        run: |
+          v=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[",]/,"",$3); print $3; exit}' Cargo.lock)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "wasm-bindgen $v"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ steps.wb.outputs.version }}
+
+      - name: Build WASM + assemble site
+        run: |
+          cargo build --lib --locked --target wasm32-unknown-unknown --release
+          mkdir -p dist
+          wasm-bindgen target/wasm32-unknown-unknown/release/tt_splat_viewer.wasm \
+            --out-dir dist --target web --no-typescript
+          cp web/index.html web/sample.ply dist/
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

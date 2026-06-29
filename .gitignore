@@ -2,11 +2,12 @@
 /target
 **/*.rs.bk
 
-# wasm / web build output
+# wasm / web build output — built in CI and deployed to GitHub Pages (.github/workflows/pages.yml).
+# web/index.html + web/sample.ply are tracked; the wasm/js are generated, not committed.
 /pkg
 /dist
-# NOTE: web/ (wasm+js+sample.ply) IS tracked so a Rust-less machine can `git pull` + static-serve it.
-# Regenerate the wasm/js with the wasm-bindgen step in CLAUDE.md and re-commit them after code changes.
+/web/*.wasm
+/web/*.js
 
 # scenes & generated renders (large / reproducible)
 *.ply
@@ -18,7 +19,7 @@
 
 # generated validation artifacts (reproducible via validation/*.py; only the .py scripts are tracked)
 /validation/*.json
-/Cargo.lock
+# Cargo.lock IS tracked so the Pages CI build is reproducible (and pins wasm-bindgen for the CLI).
 
 # editor / os
 .DS_Store
