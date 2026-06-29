@@ -729,7 +729,8 @@ struct State {
     bg_preset: usize,
     lowres: bool,    // render panes at half resolution while interacting (fill-rate relief)
     interact: u32,   // frames of low-res remaining after the last orbit/zoom
-    dragging: bool,
+    dragging: bool,  // left button: orbit
+    panning: bool,   // right button: pan the look-at target
     last_cursor: Option<(f64, f64)>,
 }
 
@@ -901,6 +902,7 @@ impl State {
             lowres: false,
             interact: 0,
             dragging: false,
+            panning: false,
             last_cursor: None,
         }
     }
@@ -1019,6 +1021,13 @@ impl State {
     /// Handle a scroll delta (dolly in/out).
     fn zoom(&mut self, scroll: f32) {
         self.orbit.radius = (self.orbit.radius * (1.0 - scroll * 0.1)).max(1e-2);
+        self.begin_interaction();
+        self.refresh_view();
+    }
+
+    /// Handle a right-drag delta — pan the look-at target (move the pivot off-centre / into the scene).
+    fn pan(&mut self, dx: f64, dy: f64) {
+        self.orbit.pan(dx as f32, dy as f32, self.config.height.max(1) as f32);
         self.begin_interaction();
         self.refresh_view();
     }
@@ -1223,18 +1232,24 @@ pub async fn run() {
                     }
                 }
                 WindowEvent::MouseInput { state: btn, button, .. } => {
-                    if button == winit::event::MouseButton::Left {
-                        state.dragging = btn == winit::event::ElementState::Pressed;
-                        if !state.dragging {
-                            state.last_cursor = None;
-                        }
+                    let pressed = btn == winit::event::ElementState::Pressed;
+                    match button {
+                        winit::event::MouseButton::Left => state.dragging = pressed,   // orbit
+                        winit::event::MouseButton::Right => state.panning = pressed,    // pan
+                        _ => {}
+                    }
+                    if !state.dragging && !state.panning {
+                        state.last_cursor = None;
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     let p = (position.x, position.y);
-                    if state.dragging {
-                        if let Some((lx, ly)) = state.last_cursor {
-                            state.orbit_drag(p.0 - lx, p.1 - ly);
+                    if let Some((lx, ly)) = state.last_cursor {
+                        let (dx, dy) = (p.0 - lx, p.1 - ly);
+                        if state.dragging {
+                            state.orbit_drag(dx, dy);
+                        } else if state.panning {
+                            state.pan(dx, dy);
                         }
                     }
                     state.last_cursor = Some(p);

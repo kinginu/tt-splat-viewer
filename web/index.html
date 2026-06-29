@@ -26,9 +26,9 @@
 <body>
   <div class="wrap">
     <h3>tt-splat-viewer <span class="hint">— left: WSR (new method) · right: 3DGS (original) · WebGPU</span></h3>
-    <p class="hint">Drag to orbit (unlimited, synced) · scroll to zoom · <b>drop a .ply onto either pane</b> ·
-      press <b>b</b> to cycle the background (black / <b>white</b> = tt-splat training bg / slate).
-      Needs a WebGPU browser (Chrome/Edge, or Safari 17.4+).</p>
+    <p class="hint">Left-drag orbit · <b>right-drag pan</b> (move the pivot / go inside) · scroll zoom ·
+      <b>drop a .ply onto either pane</b> · <b>b</b> cycles the background (black / <b>white</b> =
+      tt-splat training bg / slate). Needs a WebGPU browser (Chrome/Edge, or Safari 17.4+).</p>
     <div class="giz">
       <canvas id="gizmo" width="96" height="96"></canvas>
       <span class="lbl">orientation — X red · Y green · Z blue (tracks the panes)</span>
@@ -89,6 +89,7 @@
           if (!c) { requestAnimationFrame(startResize); return; }
           new ResizeObserver(fit).observe(c);
           window.addEventListener('resize', fit);
+          c.addEventListener('contextmenu', (e) => e.preventDefault()); // right-drag pans, no menu
           fit();
         };
         startResize();

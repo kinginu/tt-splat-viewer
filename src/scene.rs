@@ -610,6 +610,15 @@ impl Orbit {
         self.orientation = (yaw * pitch * self.orientation).normalize();
     }
 
+    /// Pan: translate the look-at target in the view plane (grab-style — the scene follows the
+    /// cursor). `dx`/`dy` are pixel deltas; the move is scaled so it tracks 1:1 at the target depth,
+    /// so you can shift the pivot off-centre and into the scene (e.g. inside a room).
+    pub fn pan(&mut self, dx: f32, dy: f32, viewport_h: f32) {
+        let world_per_px = 2.0 * self.radius * (self.fovy * 0.5).tan() / viewport_h.max(1.0);
+        // orientation·(-dx,-dy,0) = -dx·(camera right) - dy·(camera up): drag right → scene right.
+        self.target += self.orientation * Vec3::new(-dx, -dy, 0.0) * world_per_px;
+    }
+
     /// Set orientation from yaw/pitch angles (radians) — used by the offscreen `--orbit` renders.
     pub fn set_angles(&mut self, yaw: f32, pitch: f32) {
         self.orientation =

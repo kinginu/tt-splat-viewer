@@ -224,7 +224,10 @@ side-by-side with a divider.
   (Idle still re-renders full-res continuously — render-on-demand is a later refinement.)
 - **Camera**: `Orbit` is quaternion-based (`orientation: Quat`), so drag-rotation is **unlimited** in
   every direction (yaw about world-up, pitch about the current right axis; no pole clamp). `set_angles`
-  reconstructs it from yaw/pitch for the offscreen `--orbit`/`--dual` renders.
+  reconstructs it from yaw/pitch for the offscreen `--orbit`/`--dual` renders. **Left-drag orbits,
+  right-drag pans** (`Orbit::pan` translates the look-at target in the view plane, tracking the cursor
+  1:1 at target depth) so the pivot can move off-centre / into a scene (e.g. inside a room); scroll
+  dollies (`radius`). The web page suppresses the canvas context menu so right-drag works.
 - **XYZ gizmo is external** (in the page, not in the panes): `view_basis()` exports the camera basis
   (9 floats, column-major = world X/Y/Z in camera space), and `web/index.html` draws a small 2D
   orientation gizmo that tracks the shared camera. (An earlier in-pane wgpu gizmo was removed per
